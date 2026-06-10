@@ -15,11 +15,56 @@ This document maps remaining `ethers-rs` usage in Artemis to the Alloy APIs that
 
 ## Inventory summary
 
-A repository scan excluding `target/` found:
+The reproducible active-code/dependency scan used for this inventory excludes `.git/`, `target/`, `docs/`, `Cargo.lock`, every `README.md`, and `justfile`, then counts regex matches for `ethers\w*`:
 
-- 118 files with remaining ethers-rs references.
-- 11,291 `ethers*` token occurrences.
-- Generated bindings dominate the count: 88 files / 11,238 occurrences.
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+root = Path('.')
+pattern = re.compile(r'ethers\w*')
+exclude_dirs = {'.git', 'target'}
+exclude_names = {'Cargo.lock', 'README.md', 'justfile'}
+
+files = hits = generated_files = generated_hits = 0
+binding_cargo_files = binding_cargo_hits = 0
+for path in root.rglob('*'):
+    if not path.is_file():
+        continue
+    rel = path.relative_to(root).as_posix()
+    if exclude_dirs.intersection(path.parts):
+        continue
+    if rel.startswith('docs/') or path.name in exclude_names:
+        continue
+    text = path.read_text(errors='ignore')
+    count = len(pattern.findall(text))
+    if not count:
+        continue
+    files += 1
+    hits += count
+    is_binding = '/bindings/' in rel or rel.endswith('/bindings/Cargo.toml')
+    if is_binding:
+        generated_files += 1
+        generated_hits += count
+        if rel.endswith('/bindings/Cargo.toml'):
+            binding_cargo_files += 1
+            binding_cargo_hits += count
+
+print(f'active files={files} active ethers_tokens={hits}')
+print(f'generated bindings including binding Cargo.toml={generated_files} files / {generated_hits} ethers_tokens')
+print(f'binding Cargo.toml still active={binding_cargo_files} files / {binding_cargo_hits} ethers_tokens')
+print(f'generated .rs-only bindings={generated_files - binding_cargo_files} files / {generated_hits - binding_cargo_hits} ethers_tokens')
+PY
+```
+
+Current output:
+
+- Active code/dependency scan: 118 files with remaining ethers-rs references / 11,314 `ethers*` token occurrences.
+- Generated bindings dominate the count: 90 files / 11,240 `ethers*` token occurrences when the two binding `Cargo.toml` files are included.
+- Generated `.rs` binding files only: 88 files / 11,238 `ethers*` token occurrences.
+- The two excluded-from-`.rs` binding `Cargo.toml` files still contain active ethers dependencies: `crates/strategies/opensea-sudo-arb/bindings/Cargo.toml` and `crates/strategies/mev-share-uni-arb/bindings/Cargo.toml`.
+- A broader repository scan excluding only `.git/` and `target/` finds 124 files / 11,443 `ethers*` token occurrences because it includes docs, READMEs, `Cargo.lock`, and `justfile`.
 
 ### Non-generated hotspots
 
@@ -68,12 +113,16 @@ Recommended target crate family:
   - `contract`
   - `providers`
   - `provider-http`
+  - `provider-ws` for WebSocket providers and subscription transports
+  - `pubsub` for `subscribe_blocks`, `subscribe_logs`, `subscribe_pending_transactions`, and `subscribe_full_pending_transactions`
+  - `provider-mev-api` for `alloy_provider::ext::MevApi` Flashbots / MEV provider extensions
+  - `rpc-types-mev` for umbrella-crate access to MEV RPC schemas
   - `signer-local`
   - `rpc-types`
   - `reqwest-rustls-tls`
 - `alloy-primitives`
 - `alloy-rpc-types-eth`
-- `alloy-provider`
+- `alloy-provider` with equivalent `ws`, `pubsub`, and `mev-api` feature support when using direct crates instead of the umbrella `alloy` crate
 - `alloy-network`
 - `alloy-consensus`
 - `alloy-signer`
@@ -423,13 +472,15 @@ CallBuilder::new(...).state(&self.state)
 
 Alloy direction:
 
+Provider calls use `EthCall::overrides(...)` / `overrides_opt(...)`:
+
 ```rust
 use alloy_rpc_types_eth::state::StateOverride;
 
-provider.call(tx).state(overrides).await?
+provider.call(tx).overrides(overrides).await?
 ```
 
-Alloy call builders support state override directly, so Artemis likely does not need a direct custom `Middleware` analog.
+Alloy contract call builders expose state override support with `CallBuilder::state(...)`, so Artemis likely does not need a direct custom `Middleware` analog. Keep the provider-call and contract-call APIs distinct when porting call sites.
 
 ## Proposed implementation order
 
