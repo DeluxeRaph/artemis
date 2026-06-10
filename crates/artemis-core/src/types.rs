@@ -17,7 +17,7 @@ pub type CollectorStream<'a, E> = Pin<Box<dyn Stream<Item = E> + Send + 'a>>;
 #[async_trait]
 pub trait Collector<E>: Send + Sync {
     /// Returns the core event stream for the collector.
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>>;
+    async fn get_event_stream<'a>(&'a self) -> Result<CollectorStream<'a, E>>;
 }
 
 /// Strategy trait, which defines the core logic for each opportunity.
@@ -57,7 +57,7 @@ where
     E2: Send + Sync + 'static,
     F: Fn(E1) -> E2 + Send + Sync + Clone + 'static,
 {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
+    async fn get_event_stream<'a>(&'a self) -> Result<CollectorStream<'a, E2>> {
         let stream = self.collector.get_event_stream().await?;
         let f = self.f.clone();
         let stream = stream.map(f);
@@ -97,12 +97,12 @@ where
 /// Convenience enum containing all the events that can be emitted by collectors.
 pub enum Events {
     NewBlock(NewBlock),
-    Transaction(Transaction),
+    Transaction(Box<Transaction>),
     OpenseaOrder(Box<OpenseaOrder>),
 }
 
 /// Convenience enum containing all the actions that can be executed by executors.
 pub enum Actions {
     FlashbotsBundle(FlashbotsBundle),
-    SubmitTxToMempool(SubmitTxToMempool),
+    SubmitTxToMempool(Box<SubmitTxToMempool>),
 }

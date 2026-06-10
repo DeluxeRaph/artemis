@@ -31,7 +31,7 @@ where
     M::Provider: PubsubClient,
     M::Error: 'static,
 {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, Log>> {
+    async fn get_event_stream<'a>(&'a self) -> Result<CollectorStream<'a, Log>> {
         let stream = self.provider.subscribe_logs(&self.filter).await?;
         let stream = stream.filter_map(Some);
         Ok(Box::pin(stream))

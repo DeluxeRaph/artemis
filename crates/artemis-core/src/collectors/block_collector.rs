@@ -37,7 +37,7 @@ where
     M::Provider: PubsubClient,
     M::Error: 'static,
 {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, NewBlock>> {
+    async fn get_event_stream<'a>(&'a self) -> Result<CollectorStream<'a, NewBlock>> {
         let stream = self.provider.subscribe_blocks().await?;
         let stream = stream.filter_map(|block| match block.hash {
             Some(hash) => block.number.map(|number| NewBlock { hash, number }),
