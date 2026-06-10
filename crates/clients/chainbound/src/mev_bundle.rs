@@ -1,5 +1,6 @@
 use ethers::types::TransactionRequest;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// An UUIDv4 identifier, useful for cancelling/replacing bundles.
 pub type ReplacementUuid = String;
@@ -36,21 +37,23 @@ pub enum BlockBuilder {
     All,
 }
 
-impl ToString for BlockBuilder {
-    fn to_string(&self) -> String {
-        match self {
-            BlockBuilder::Flashbots => "flashbots".to_string(),
-            BlockBuilder::Beaverbuild => "beaverbuild".to_string(),
-            BlockBuilder::Rsync => "rsync".to_string(),
-            BlockBuilder::Builder0x69 => "builder0x69".to_string(),
-            BlockBuilder::Titan => "titan".to_string(),
-            BlockBuilder::F1b => "f1b".to_string(),
-            BlockBuilder::Blocknative => "blocknative".to_string(),
-            BlockBuilder::Nfactorial => "nfactorial".to_string(),
-            BlockBuilder::Buildai => "buildai".to_string(),
-            BlockBuilder::Other(name) => name.to_string(),
-            BlockBuilder::All => "all".to_string(),
-        }
+impl fmt::Display for BlockBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let builder = match self {
+            BlockBuilder::Flashbots => "flashbots",
+            BlockBuilder::Beaverbuild => "beaverbuild",
+            BlockBuilder::Rsync => "rsync",
+            BlockBuilder::Builder0x69 => "builder0x69",
+            BlockBuilder::Titan => "titan",
+            BlockBuilder::F1b => "f1b",
+            BlockBuilder::Blocknative => "blocknative",
+            BlockBuilder::Nfactorial => "nfactorial",
+            BlockBuilder::Buildai => "buildai",
+            BlockBuilder::Other(name) => name,
+            BlockBuilder::All => "all",
+        };
+
+        f.write_str(builder)
     }
 }
 

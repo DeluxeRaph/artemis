@@ -102,7 +102,7 @@ impl FiberCollector {
 
 #[async_trait]
 impl Collector<Event> for FiberCollector {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, Event>> {
+    async fn get_event_stream<'a>(&'a self) -> Result<CollectorStream<'a, Event>> {
         self.get_event_stream().await
     }
 }
