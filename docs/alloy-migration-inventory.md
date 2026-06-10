@@ -64,7 +64,7 @@ Current output:
 - Generated bindings dominate the count: 90 files / 11,240 `ethers*` token occurrences when the two binding `Cargo.toml` files are included.
 - Generated `.rs` binding files only: 88 files / 11,238 `ethers*` token occurrences.
 - The two excluded-from-`.rs` binding `Cargo.toml` files still contain active ethers dependencies: `crates/strategies/opensea-sudo-arb/bindings/Cargo.toml` and `crates/strategies/mev-share-uni-arb/bindings/Cargo.toml`.
-- A broader repository scan excluding only `.git/` and `target/` finds 124 files / 11,443 `ethers*` token occurrences because it includes docs, READMEs, `Cargo.lock`, and `justfile`.
+- A broader repository scan excluding only `.git/` and `target/` finds 124 files / 11,453 `ethers*` token occurrences because it includes docs, READMEs, `Cargo.lock`, and `justfile`.
 
 ### Non-generated hotspots
 
