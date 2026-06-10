@@ -58,6 +58,7 @@ impl OpenSeaV2Client {
 mod tests {
 
     use super::*;
+    use alloy_primitives::{Address, Bytes, B256, U256};
     use std::path::PathBuf;
 
     #[test]
@@ -80,5 +81,31 @@ mod tests {
         let res: FulfillListingResponse = serde_json::from_str(&res).unwrap();
         assert_eq!(res.protocol, "seaport1.5");
         assert_eq!(res.fulfillment_data.transaction.value, 20000000000000000);
+    }
+
+    #[test]
+    fn response_uses_alloy_primitives() {
+        fn assert_address(_: Address) {}
+        fn assert_b256(_: B256) {}
+        fn assert_u256(_: U256) {}
+        fn assert_bytes(_: Bytes) {}
+
+        let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        d.push("resources/sample_response_1.5.json");
+        let res = std::fs::read_to_string(d).unwrap();
+        let res: FulfillListingResponse = serde_json::from_str(&res).unwrap();
+        let params = res.fulfillment_data.transaction.input_data.parameters;
+
+        assert_address(params.consideration_token);
+        assert_u256(params.consideration_identifier);
+        assert_u256(params.consideration_amount);
+        assert_address(params.offerer);
+        assert_address(params.zone);
+        assert_address(params.offer_token);
+        assert_u256(params.offer_identifier);
+        assert_b256(params.zone_hash);
+        assert_b256(params.offerer_conduit_key);
+        assert_b256(params.fulfiller_conduit_key);
+        assert_bytes(params.signature);
     }
 }

@@ -3384,6 +3384,7 @@ dependencies = [
 name = "opensea-sudo-arb"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "artemis-core",
  "async-trait",
@@ -3391,6 +3392,7 @@ dependencies = [
  "ethers",
  "opensea-stream",
  "opensea-v2",
+ "serde_json",
  "tracing",
 ]
 
@@ -3398,7 +3400,7 @@ dependencies = [
 name = "opensea-v2"
 version = "0.1.0"
 dependencies = [
- "ethers",
+ "alloy-primitives",
  "reqwest",
  "serde",
  "serde_json",

@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use ethers::types::{Bytes, Chain, H160, H256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use serde::{de, Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
@@ -16,7 +16,7 @@ pub struct FulfillListingRequest {
 /// Listing we want to fulfill on OpenSea.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Listing {
-    pub hash: H256,
+    pub hash: B256,
     #[serde(serialize_with = "chain_to_str")]
     pub chain: Chain,
     #[serde(
@@ -29,7 +29,13 @@ pub struct Listing {
 /// Address which will fulfill the listing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Fulfiller {
-    pub address: H160,
+    pub address: Address,
+}
+
+/// OpenSea chain identifier supported by this client.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Chain {
+    Mainnet,
 }
 
 /// Response from OpenSea fulfill listing endpoint.
@@ -73,14 +79,14 @@ pub struct InputData {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Parameters {
-    pub consideration_token: H160,
+    pub consideration_token: Address,
     #[serde(deserialize_with = "u256_from_dec_str")]
     pub consideration_identifier: U256,
     #[serde(deserialize_with = "u256_from_dec_str")]
     pub consideration_amount: U256,
-    pub offerer: H160,
-    pub zone: H160,
-    pub offer_token: H160,
+    pub offerer: Address,
+    pub zone: Address,
+    pub offer_token: Address,
     #[serde(deserialize_with = "u256_from_dec_str")]
     pub offer_identifier: U256,
     #[serde(deserialize_with = "u256_from_dec_str")]
@@ -90,11 +96,11 @@ pub struct Parameters {
     pub start_time: U256,
     #[serde(deserialize_with = "u256_from_dec_str")]
     pub end_time: U256,
-    pub zone_hash: H256,
+    pub zone_hash: B256,
     #[serde(deserialize_with = "u256_from_dec_str")]
     pub salt: U256,
-    pub offerer_conduit_key: H256,
-    pub fulfiller_conduit_key: H256,
+    pub offerer_conduit_key: B256,
+    pub fulfiller_conduit_key: B256,
     #[serde(deserialize_with = "u256_from_dec_str")]
     pub total_original_additional_recipients: U256,
     pub additional_recipients: Vec<AdditionalRecipient>,
@@ -107,7 +113,7 @@ pub struct Parameters {
 pub struct AdditionalRecipient {
     #[serde(deserialize_with = "u256_from_dec_str")]
     pub amount: U256,
-    pub recipient: H160,
+    pub recipient: Address,
 }
 
 /// Error returned by the OpenSea API.
@@ -121,7 +127,6 @@ pub enum OpenSeaApiError {
 fn chain_to_str<S: Serializer>(chain: &Chain, serializer: S) -> Result<S::Ok, S::Error> {
     let chain_str = match chain {
         Chain::Mainnet => "ethereum",
-        _ => Err(serde::ser::Error::custom("Unsupported chain"))?,
     };
     serializer.serialize_str(chain_str)
 }
@@ -154,5 +159,5 @@ where
     D: de::Deserializer<'de>,
 {
     let val = String::deserialize(deserializer)?;
-    U256::from_dec_str(&val).map_err(de::Error::custom)
+    U256::from_str(&val).map_err(de::Error::custom)
 }
