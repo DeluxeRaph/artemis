@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use alloy::{
+    primitives::{Address as AlloyAddress, Bytes as AlloyBytes, U256 as AlloyU256},
+    rpc::types::{TransactionInput, TransactionRequest as AlloyTransactionRequest},
+};
 use bindings::lssvm_pair_factory::{LSSVMPairFactory, NewPairFilter};
 use bindings::sudo_opensea_arb::SudoOpenseaArb;
 use bindings::sudo_pair_quoter::{SellQuote, SudoPairQuoter, SUDOPAIRQUOTER_DEPLOYED_BYTECODE};
@@ -18,7 +22,7 @@ use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use artemis_core::utilities::state_override_middleware::StateOverrideMiddleware;
 use ethers::providers::Middleware;
-use ethers::types::{Filter, H256};
+use ethers::types::{transaction::eip2718::TypedTransaction, Filter, NameOrAddress, H256};
 use ethers::types::{H160, U256};
 use opensea_stream::schema::Chain;
 use opensea_v2::client::OpenSeaV2Client;
@@ -158,13 +162,9 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
     async fn process_new_block_event(&mut self, event: NewBlock) -> Result<()> {
         info!("processing new block {}", event.number);
         // Find new pools tthat were created in the last block.
-        let new_pools = self
-            .get_new_pools(event.number.as_u64(), event.number.as_u64())
-            .await?;
+        let new_pools = self.get_new_pools(event.number, event.number).await?;
         // Find existing pools that were touched in the last block.
-        let touched_pools = self
-            .get_touched_pools(event.number.as_u64(), event.number.as_u64())
-            .await?;
+        let touched_pools = self.get_touched_pools(event.number, event.number).await?;
         // Get quotes for all new and touched pools and update state.
         let quotes = self
             .get_quotes_for_pools([new_pools, touched_pools].concat())
@@ -206,10 +206,11 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
                 sudo_pool,
             )
             .tx;
+        let tx = ethers_typed_tx_to_alloy_request(&tx)?;
         Some(Action::SubmitTx(SubmitTxToMempool {
             tx,
             gas_bid_info: Some(GasBidInfo {
-                total_profit,
+                total_profit: ethers_u256_to_alloy(total_profit),
                 bid_percentage: self.bid_percentage,
             }),
         }))
@@ -287,5 +288,65 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
             pool_addresses.extend(addresses);
         }
         Ok(pool_addresses)
+    }
+}
+
+fn ethers_typed_tx_to_alloy_request(tx: &TypedTransaction) -> Option<AlloyTransactionRequest> {
+    let mut request = AlloyTransactionRequest::default();
+
+    if let Some(from) = tx.from() {
+        request = request.from(ethers_address_to_alloy(*from));
+    }
+
+    match tx.to()? {
+        NameOrAddress::Address(to) => {
+            request = request.to(ethers_address_to_alloy(*to));
+        }
+        NameOrAddress::Name(_) => return None,
+    }
+
+    if let Some(value) = tx.value() {
+        request = request.value(ethers_u256_to_alloy(*value));
+    }
+    if let Some(gas) = tx.gas() {
+        request = request.gas_limit(ethers_u256_to_u64(*gas)?);
+    }
+    if let Some(nonce) = tx.nonce() {
+        request = request.nonce(ethers_u256_to_u64(*nonce)?);
+    }
+    if let Some(gas_price) = tx.gas_price() {
+        request = request.gas_price(ethers_u256_to_u128(gas_price)?);
+    }
+    if let Some(chain_id) = tx.chain_id() {
+        request.chain_id = Some(chain_id.as_u64());
+    }
+    if let Some(data) = tx.data() {
+        request = request.input(TransactionInput::new(AlloyBytes::from(data.to_vec())));
+    }
+
+    Some(request)
+}
+
+fn ethers_address_to_alloy(address: H160) -> AlloyAddress {
+    AlloyAddress::from_slice(address.as_bytes())
+}
+
+fn ethers_u256_to_alloy(value: U256) -> AlloyU256 {
+    AlloyU256::from_str_radix(&value.to_string(), 10).expect("ethers U256 decimal is valid")
+}
+
+fn ethers_u256_to_u64(value: U256) -> Option<u64> {
+    if value > U256::from(u64::MAX) {
+        None
+    } else {
+        Some(value.as_u64())
+    }
+}
+
+fn ethers_u256_to_u128(value: U256) -> Option<u128> {
+    if value > U256::from(u128::MAX) {
+        None
+    } else {
+        Some(value.as_u128())
     }
 }

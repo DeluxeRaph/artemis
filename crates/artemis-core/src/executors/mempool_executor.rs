@@ -4,16 +4,13 @@ use std::{
 };
 
 use crate::types::Executor;
+use alloy::{primitives::U256, providers::Provider, rpc::types::TransactionRequest};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use ethers::{
-    providers::Middleware,
-    types::{transaction::eip2718::TypedTransaction, U256},
-};
 
 /// An executor that sends transactions to the mempool.
-pub struct MempoolExecutor<M> {
-    client: Arc<M>,
+pub struct MempoolExecutor<P> {
+    client: Arc<P>,
 }
 
 /// Information about the gas bid for a transaction.
@@ -28,38 +25,39 @@ pub struct GasBidInfo {
 
 #[derive(Debug, Clone)]
 pub struct SubmitTxToMempool {
-    pub tx: TypedTransaction,
+    pub tx: TransactionRequest,
     pub gas_bid_info: Option<GasBidInfo>,
 }
 
-impl<M: Middleware> MempoolExecutor<M> {
-    pub fn new(client: Arc<M>) -> Self {
+impl<P: Provider> MempoolExecutor<P> {
+    pub fn new(client: Arc<P>) -> Self {
         Self { client }
     }
 }
 
 #[async_trait]
-impl<M> Executor<SubmitTxToMempool> for MempoolExecutor<M>
+impl<P> Executor<SubmitTxToMempool> for MempoolExecutor<P>
 where
-    M: Middleware,
-    M::Error: 'static,
+    P: Provider + Send + Sync,
 {
     /// Send a transaction to the mempool.
     async fn execute(&self, mut action: SubmitTxToMempool) -> Result<()> {
         let gas_usage = self
             .client
-            .estimate_gas(&action.tx, None)
+            .estimate_gas(action.tx.clone())
             .await
             .context("Error estimating gas usage: {}")?;
 
         let bid_gas_price;
         if let Some(gas_bid_info) = action.gas_bid_info {
             // gas price at which we'd break even, meaning 100% of profit goes to validator
-            let breakeven_gas_price = gas_bid_info.total_profit / gas_usage;
+            let breakeven_gas_price = gas_bid_info.total_profit / U256::from(gas_usage);
             // gas price corresponding to bid percentage
-            bid_gas_price = breakeven_gas_price
-                .mul(gas_bid_info.bid_percentage)
-                .div(100);
+            bid_gas_price = u256_to_u128(
+                breakeven_gas_price
+                    .mul(U256::from(gas_bid_info.bid_percentage))
+                    .div(U256::from(100)),
+            )?;
         } else {
             bid_gas_price = self
                 .client
@@ -67,8 +65,14 @@ where
                 .await
                 .context("Error getting gas price: {}")?;
         }
-        action.tx.set_gas_price(bid_gas_price);
-        self.client.send_transaction(action.tx, None).await?;
+        action.tx = action.tx.gas_price(bid_gas_price);
+        let _ = self.client.send_transaction(action.tx).await?;
         Ok(())
     }
+}
+
+fn u256_to_u128(value: U256) -> Result<u128> {
+    value
+        .try_into()
+        .context("gas bid price does not fit into u128")
 }

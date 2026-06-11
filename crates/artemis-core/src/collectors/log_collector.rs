@@ -1,39 +1,35 @@
 use crate::types::{Collector, CollectorStream};
+use alloy::{
+    providers::Provider,
+    rpc::types::{Filter, Log},
+};
 use anyhow::Result;
 use async_trait::async_trait;
-use ethers::{
-    prelude::Middleware,
-    providers::PubsubClient,
-    types::{Filter, Log},
-};
 use std::sync::Arc;
-use tokio_stream::StreamExt;
 
 /// A collector that listens for new blockchain event logs based on a [Filter](Filter),
 /// and generates a stream of [events](Log).
-pub struct LogCollector<M> {
-    provider: Arc<M>,
+pub struct LogCollector<P> {
+    provider: Arc<P>,
     filter: Filter,
 }
 
-impl<M> LogCollector<M> {
-    pub fn new(provider: Arc<M>, filter: Filter) -> Self {
+impl<P> LogCollector<P> {
+    pub fn new(provider: Arc<P>, filter: Filter) -> Self {
         Self { provider, filter }
     }
 }
 
 /// Implementation of the [Collector](Collector) trait for the [LogCollector](LogCollector).
-/// This implementation uses the [PubsubClient](PubsubClient) to subscribe to new logs.
+/// This implementation uses Alloy provider pubsub support to subscribe to new logs.
 #[async_trait]
-impl<M> Collector<Log> for LogCollector<M>
+impl<P> Collector<Log> for LogCollector<P>
 where
-    M: Middleware,
-    M::Provider: PubsubClient,
-    M::Error: 'static,
+    P: Provider + Send + Sync,
 {
     async fn get_event_stream<'a>(&'a self) -> Result<CollectorStream<'a, Log>> {
         let stream = self.provider.subscribe_logs(&self.filter).await?;
-        let stream = stream.filter_map(Some);
+        let stream = stream.into_stream();
         Ok(Box::pin(stream))
     }
 }

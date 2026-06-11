@@ -1,10 +1,12 @@
+use alloy::providers::ProviderBuilder;
+use alloy::signers::local::PrivateKeySigner;
 use anyhow::Result;
 use clap::Parser;
 use ethers::types::H160;
 use opensea_v2::client::{OpenSeaApiConfig, OpenSeaV2Client};
 
 use ethers::prelude::MiddlewareBuilder;
-use ethers::providers::{Provider, Ws};
+use ethers::providers::{Provider as EthersProvider, Ws};
 
 use artemis_core::collectors::block_collector::BlockCollector;
 use artemis_core::collectors::opensea_order_collector::OpenseaOrderCollector;
@@ -58,14 +60,23 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Set up ethers provider.
-    let ws = Ws::connect(args.wss).await?;
-    let provider = Provider::new(ws);
+    // Set up providers. Strategies still use ethers-generated bindings for now, while
+    // core collectors/executors use the migrated Alloy provider boundary.
+    let ws = Ws::connect(args.wss.clone()).await?;
+    let ethers_provider = EthersProvider::new(ws);
 
     let wallet: LocalWallet = args.private_key.parse().unwrap();
     let address = wallet.address();
 
-    let provider = Arc::new(provider.nonce_manager(address).with_signer(wallet));
+    let ethers_provider = Arc::new(ethers_provider.nonce_manager(address).with_signer(wallet));
+
+    let alloy_signer: PrivateKeySigner = args.private_key.parse()?;
+    let alloy_provider = Arc::new(
+        ProviderBuilder::new()
+            .wallet(alloy_signer)
+            .connect(&args.wss)
+            .await?,
+    );
 
     // Set up opensea client.
     let opensea_client = OpenSeaV2Client::new(OpenSeaApiConfig {
@@ -76,7 +87,7 @@ async fn main() -> Result<()> {
     let mut engine: Engine<Event, Action> = Engine::default();
 
     // Set up block collector.
-    let block_collector = Box::new(BlockCollector::new(provider.clone()));
+    let block_collector = Box::new(BlockCollector::new(alloy_provider.clone()));
     let block_collector = CollectorMap::new(block_collector, Event::NewBlock);
     engine.add_collector(Box::new(block_collector));
 
@@ -91,11 +102,11 @@ async fn main() -> Result<()> {
         arb_contract_address: H160::from_str(&args.arb_contract_address)?,
         bid_percentage: args.bid_percentage,
     };
-    let strategy = OpenseaSudoArb::new(Arc::new(provider.clone()), opensea_client, config);
+    let strategy = OpenseaSudoArb::new(ethers_provider.clone(), opensea_client, config);
     engine.add_strategy(Box::new(strategy));
 
     // Set up flashbots executor.
-    let executor = Box::new(MempoolExecutor::new(provider.clone()));
+    let executor = Box::new(MempoolExecutor::new(alloy_provider.clone()));
     let executor = ExecutorMap::new(executor, |action| match action {
         Action::SubmitTx(tx) => Some(tx),
     });

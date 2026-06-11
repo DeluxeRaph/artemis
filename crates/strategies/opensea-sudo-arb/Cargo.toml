@@ -6,7 +6,8 @@ edition = "2021"
 [dependencies]
 
 ## eth
-alloy-primitives = "0.7.7"
+alloy = { version = "2.0.5", features = ["rpc-types"] }
+alloy-primitives = "1.6.0"
 artemis-core = { path = "../../artemis-core" }
 ethers.workspace = true
 bindings = { path = "./bindings" }

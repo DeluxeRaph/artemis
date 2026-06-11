@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 
 ## eth
+alloy = { version = "2.0.5", features = ["full", "node-bindings"] }
 ethers.workspace = true
 opensea-stream = { git = "https://github.com/FrankieIsLost/opensea-stream-rs"}
 mev-share = "0.1.4"
@@ -15,7 +16,6 @@ ethers-flashbots = { git = "https://github.com/FrankieIsLost/ethers-flashbots", 
 
 ## async
 async-trait = "0.1.64"
-futures = "0.3"
 reqwest = { version = "0.11.14", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ['sync'] }
@@ -26,4 +26,3 @@ anyhow = "1.0.70"
 thiserror = "1.0.40"
 tracing = "0.1.37"
 tower = "0.4.13"
-alloy-rpc-types-eth = "0.2.1"

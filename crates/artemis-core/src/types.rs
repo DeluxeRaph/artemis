@@ -1,6 +1,6 @@
+use alloy::rpc::types::Transaction;
 use anyhow::Result;
 use async_trait::async_trait;
-use alloy_rpc_types_eth::Transaction;
 use std::pin::Pin;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
