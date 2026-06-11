@@ -12,7 +12,7 @@ pub fn generate_strategy(name: &str) -> TokenStream {
 
         use anyhow::Result;
         use artemis_core::types::Strategy;
-        use ethers::providers::Middleware;
+        use alloy::providers::Provider;
 
         use super::types::{Action, Config, Event};
 
@@ -20,14 +20,14 @@ pub fn generate_strategy(name: &str) -> TokenStream {
             client: Arc<#generic_type>,
         }
 
-        impl<#generic_type: Middleware + 'static> #struct_name<#generic_type> {
+        impl<#generic_type: Provider + 'static> #struct_name<#generic_type> {
             pub fn new(client: Arc<#generic_type>, config: Config) -> Self {
                 Self { client }
             }
         }
 
         #[async_trait]
-        impl<#generic_type: Middleware + 'static> Strategy<Event, Action> for #struct_name<#generic_type> {
+        impl<#generic_type: Provider + 'static> Strategy<Event, Action> for #struct_name<#generic_type> {
             async fn sync_state(&mut self) -> Result<()> {
                 Ok(())
             }
@@ -37,7 +37,7 @@ pub fn generate_strategy(name: &str) -> TokenStream {
             }
         }
 
-        impl<#generic_type: Middleware + 'static> #struct_name<#generic_type> {
+        impl<#generic_type: Provider + 'static> #struct_name<#generic_type> {
         }
     }
 }
