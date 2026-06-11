@@ -9,7 +9,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::info;
 
 const FLASHBOTS_HEADER: &str = "x-flashbots-signature";
 
@@ -88,10 +88,8 @@ impl MevshareExecutor {
 impl Executor<SendBundleRequest> for MevshareExecutor {
     /// Send bundles to the matchmaker.
     async fn execute(&self, action: SendBundleRequest) -> Result<()> {
-        match self.send_bundle(action).await {
-            Ok(body) => info!("Bundle response: {:?}", body),
-            Err(e) => error!("Bundle error: {}", e),
-        };
+        let body = self.send_bundle(action).await?;
+        info!("Bundle response: {:?}", body);
         Ok(())
     }
 }
@@ -112,6 +110,10 @@ mod tests {
     use alloy::{
         primitives::{address, b256, bytes},
         signers::{local::PrivateKeySigner, Signer},
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
     };
 
     #[test]
@@ -172,6 +174,38 @@ mod tests {
         );
         assert_eq!(json["body"][1]["tx"], "0xdeadbeef");
         assert_eq!(json["body"][1]["canRevert"], false);
+    }
+
+    #[tokio::test]
+    async fn mevshare_execute_returns_error_when_relay_rejects_bundle() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 51\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"message\":\"boom\"}}",
+                )
+                .await
+                .unwrap();
+        });
+        let executor = MevshareExecutor::with_relay_url(PrivateKeySigner::random(), relay_url);
+        let request = SendBundleRequest::new(
+            1,
+            Some(2),
+            crate::mev_share::rpc::ProtocolVersion::V0_1,
+            vec![crate::mev_share::rpc::BundleItem::Hash {
+                hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+            }],
+        );
+
+        let err = executor.execute(request).await.unwrap_err().to_string();
+
+        assert!(err.contains("500"), "unexpected error: {err}");
     }
 
     #[test]

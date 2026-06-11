@@ -16,7 +16,7 @@ use tracing::info;
 
 use crate::constants::FACTORY_DEPLOYMENT_BLOCK;
 use crate::types::Config;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use artemis_core::collectors::block_collector::NewBlock;
 use artemis_core::collectors::opensea_order_collector::OpenseaOrder;
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
@@ -294,17 +294,19 @@ impl<M: Provider + Send + Sync + 'static> OpenseaSudoArb<M> {
 
             let addresses = events
                 .iter()
-                .filter_map(|event| {
-                    let topics = event.topics().to_vec();
-                    let decoded =
-                        bindings::lssvm_pair_factory::LSSVMPairFactory::NewPair::decode_raw_log(
-                            topics,
-                            event.data().data.as_ref(),
+                .map(|event| {
+                    decode_new_pair_pool_address(
+                        event.topics().to_vec(),
+                        event.data().data.as_ref(),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to decode LSSVMPairFactory NewPair log at address {}",
+                            event.address()
                         )
-                        .ok()?;
-                    Some(decoded.pool_address)
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>>>()?;
 
             info!(
                 "found {} new pools in block range, total progress: {}%",
@@ -315,6 +317,13 @@ impl<M: Provider + Send + Sync + 'static> OpenseaSudoArb<M> {
         }
         Ok(pool_addresses)
     }
+}
+
+fn decode_new_pair_pool_address(topics: Vec<B256>, data: &[u8]) -> Result<Address> {
+    let decoded =
+        bindings::lssvm_pair_factory::LSSVMPairFactory::NewPair::decode_raw_log(topics, data)
+            .context("failed to decode LSSVMPairFactory NewPair log")?;
+    Ok(decoded.pool_address)
 }
 
 fn build_execute_arb_tx(
@@ -337,7 +346,7 @@ fn build_execute_arb_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{address, b256};
+    use alloy::primitives::{address, b256, bytes};
 
     #[test]
     fn opensea_arb_execute_arb_tx_builder_encodes_alloy_call() {
@@ -460,6 +469,32 @@ mod tests {
         assert_eq!(
             override_account.code.as_ref().map(|code| code.as_ref()),
             Some(&SUDOPAIRQUOTER_DEPLOYED_BYTECODE[..])
+        );
+    }
+
+    #[test]
+    fn opensea_arb_new_pair_decode_errors_on_malformed_log_data() {
+        let err = decode_new_pair_pool_address(
+            vec![bindings::lssvm_pair_factory::LSSVMPairFactory::NewPair::SIGNATURE_HASH],
+            &[0xde, 0xad, 0xbe, 0xef],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("NewPair"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn opensea_arb_new_pair_decode_returns_pool_address() {
+        let pool_address = decode_new_pair_pool_address(
+            vec![bindings::lssvm_pair_factory::LSSVMPairFactory::NewPair::SIGNATURE_HASH],
+            bytes!("0000000000000000000000001111111111111111111111111111111111111111").as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            pool_address,
+            address!("1111111111111111111111111111111111111111")
         );
     }
 }

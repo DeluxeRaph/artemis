@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::types::Executor;
 
@@ -62,14 +62,11 @@ where
             reverting_tx_hashes: Vec::new(),
         };
 
-        if let Err(simulate_error) = self.relay_client.call_bundle(&bundle, block_number).await {
-            error!("Error simulating bundle: {:?}", simulate_error);
-        }
+        let simulation = self.relay_client.call_bundle(&bundle, block_number).await?;
+        info!("Flashbots bundle simulation response: {:?}", simulation);
 
-        match self.relay_client.send_bundle(&bundle).await {
-            Ok(response) => info!("Flashbots bundle response: {:?}", response),
-            Err(send_error) => error!("Error sending bundle: {:?}", send_error),
-        }
+        let response = self.relay_client.send_bundle(&bundle).await?;
+        info!("Flashbots bundle response: {:?}", response);
 
         Ok(())
     }
@@ -188,6 +185,15 @@ async fn sign_bundle_transaction<S>(signer: &S, tx: &TransactionRequest) -> Resu
 where
     S: TxSigner<Signature> + Send + Sync,
 {
+    if let Some(from) = tx.from {
+        let signer_address = TxSigner::address(signer);
+        if from != signer_address {
+            return Err(anyhow!(
+                "Flashbots bundle transaction request from address {from} does not match signer address {signer_address}"
+            ));
+        }
+    }
+
     let mut tx = alloy_tx_request_to_signable(tx)?;
     let signature = signer.sign_transaction(tx.signable()).await?;
     Ok(tx.network_encode(&signature))
@@ -336,8 +342,13 @@ mod tests {
     use super::*;
     use alloy::{
         primitives::{address, b256, bytes, U256},
+        providers::{mock::Asserter, ProviderBuilder},
         rpc::types::{AccessListItem, TransactionInput},
         signers::local::PrivateKeySigner,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
     };
 
     #[test]
@@ -443,6 +454,115 @@ mod tests {
         let raw = sign_bundle_transaction(&signer, &tx).await.unwrap();
 
         assert!(!raw.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flashbots_execute_returns_error_when_relay_rejects_send_bundle() {
+        let asserter = Asserter::new();
+        asserter.push_success(&123_u64);
+        let provider = Arc::new(ProviderBuilder::new().connect_mocked_client(asserter));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url: Url = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            write_http_response(
+                &mut socket,
+                200,
+                "OK",
+                r#"{"jsonrpc":"2.0","id":1,"result":{"bundleHash":"0xabc"}}"#,
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            write_http_response(
+                &mut socket,
+                500,
+                "Internal Server Error",
+                r#"{"jsonrpc":"2.0","id":1,"error":{"message":"boom"}}"#,
+            )
+            .await;
+        });
+
+        let tx_signer = PrivateKeySigner::random();
+        let relay_signer = PrivateKeySigner::random();
+        let executor = FlashbotsExecutor::new(provider, tx_signer.clone(), relay_signer, relay_url);
+        let mut tx = TransactionRequest::default()
+            .from(tx_signer.address())
+            .to(address!("2222222222222222222222222222222222222222"))
+            .value(U256::from(1234))
+            .gas_limit(21_000)
+            .nonce(7)
+            .gas_price(1_500_000_000)
+            .input(TransactionInput::new(bytes!("deadbeef")));
+        tx.chain_id = Some(1);
+
+        let err = executor.execute(vec![tx]).await.unwrap_err().to_string();
+
+        assert!(err.contains("500"), "unexpected error: {err}");
+    }
+
+    async fn write_http_response(
+        socket: &mut tokio::net::TcpStream,
+        status: u16,
+        reason: &str,
+        body: &str,
+    ) {
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn flashbots_bundle_transaction_accepts_matching_from_address() {
+        let signer = PrivateKeySigner::random();
+        let mut tx = TransactionRequest::default()
+            .from(signer.address())
+            .to(address!("2222222222222222222222222222222222222222"))
+            .value(U256::from(1234))
+            .gas_limit(21_000)
+            .nonce(7)
+            .gas_price(1_500_000_000)
+            .input(TransactionInput::new(bytes!("deadbeef")));
+        tx.chain_id = Some(1);
+
+        let raw = sign_bundle_transaction(&signer, &tx).await.unwrap();
+
+        assert!(!raw.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flashbots_bundle_transaction_rejects_mismatched_from_address() {
+        let signer = PrivateKeySigner::random();
+        let mut tx = TransactionRequest::default()
+            .from(address!("1111111111111111111111111111111111111111"))
+            .to(address!("2222222222222222222222222222222222222222"))
+            .value(U256::from(1234))
+            .gas_limit(21_000)
+            .nonce(7)
+            .gas_price(1_500_000_000)
+            .input(TransactionInput::new(bytes!("deadbeef")));
+        tx.chain_id = Some(1);
+
+        let err = sign_bundle_transaction(&signer, &tx)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("from"), "unexpected error: {err}");
+        assert!(
+            err.contains("does not match signer"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
