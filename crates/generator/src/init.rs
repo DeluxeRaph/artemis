@@ -21,7 +21,7 @@ pub fn generate_strategy(name: &str) -> TokenStream {
         }
 
         impl<#generic_type: Provider + 'static> #struct_name<#generic_type> {
-            pub fn new(client: Arc<#generic_type>, config: Config) -> Self {
+            pub fn new(client: Arc<#generic_type>, _config: Config) -> Self {
                 Self { client }
             }
         }
@@ -32,7 +32,7 @@ pub fn generate_strategy(name: &str) -> TokenStream {
                 Ok(())
             }
 
-            async fn process_event(&mut self, event: Event) -> Option<Action> {
+            async fn process_event(&mut self, event: Event) -> Vec<Action> {
                 match event {}
             }
         }
@@ -78,5 +78,24 @@ pub fn generate_lib() -> TokenStream {
 pub fn generate_constants() -> TokenStream {
     quote! {
         //add required constants here
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_strategy_uses_current_strategy_trait_signature() {
+        let strategy = generate_strategy("ProbeStrategy").to_string();
+
+        assert!(
+            strategy.contains("-> Vec < Action >"),
+            "generated Strategy impl must return Vec<Action> from process_event:\n{strategy}"
+        );
+        assert!(
+            !strategy.contains("-> Option < Action >"),
+            "generated Strategy impl must not use the obsolete Option<Action> return type:\n{strategy}"
+        );
     }
 }

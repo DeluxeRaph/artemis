@@ -60,11 +60,7 @@ fn generate_crate<P: AsRef<Path>>(
     lib: TokenStream,
 ) -> Result<(), Error> {
     // Crate name and dependencies
-    let dependencies = vec![
-        ("anyhow", "1.0"),
-        ("ethers", "2"),
-        ("async-trait", "0.1.64"),
-    ];
+    let dependencies = strategy_dependencies();
 
     let path: PathBuf = {
         let mut p: PathBuf = root.as_ref().to_path_buf();
@@ -130,10 +126,29 @@ fn format_code<P: AsRef<Path>>(crate_name: P) -> Result<(), Error> {
     Ok(())
 }
 
+fn strategy_dependencies() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("anyhow", "1.0"),
+        (
+            "alloy",
+            r#"{ version = "2.0.5", features = ["full", "node-bindings"] }"#,
+        ),
+        ("async-trait", "0.1.64"),
+    ]
+}
+
+fn format_dependency(name: &str, requirement: &str) -> String {
+    if requirement.trim_start().starts_with('{') {
+        format!("{} = {}", name, requirement)
+    } else {
+        format!("{} = \"{}\"", name, requirement)
+    }
+}
+
 fn generate_cargo_toml_code(crate_name: &str, dependencies: &[(&str, &str)]) -> String {
     let dependencies_str: String = dependencies
         .iter()
-        .map(|(name, version)| format!("{} = \"{}\"", name, version))
+        .map(|(name, requirement)| format_dependency(name, requirement))
         .collect::<Vec<String>>()
         .join("\n");
 
@@ -150,4 +165,23 @@ edition = "2021"
 "#,
         crate_name, dependencies_str, r#"artemis-core = { path = "../../artemis-core" }"#,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_cargo_toml_includes_alloy_provider_dependency_without_ethers() {
+        let cargo_toml = generate_cargo_toml_code("probe_strategy", &strategy_dependencies());
+
+        assert!(
+            cargo_toml.contains("alloy ="),
+            "generated Cargo.toml must include alloy for the strategy Provider skeleton:\n{cargo_toml}"
+        );
+        assert!(
+            !cargo_toml.contains("ethers ="),
+            "generated Cargo.toml should not keep unused ethers dependency:\n{cargo_toml}"
+        );
+    }
 }
