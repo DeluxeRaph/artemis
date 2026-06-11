@@ -4,13 +4,9 @@ use anyhow::Result;
 use clap::Parser;
 use opensea_v2::client::{OpenSeaApiConfig, OpenSeaV2Client};
 
-use ethers::prelude::MiddlewareBuilder;
-use ethers::providers::{Provider as EthersProvider, Ws};
-
 use artemis_core::collectors::block_collector::BlockCollector;
 use artemis_core::collectors::opensea_order_collector::OpenseaOrderCollector;
 use artemis_core::executors::mempool_executor::MempoolExecutor;
-use ethers::signers::{LocalWallet, Signer};
 use opensea_sudo_arb::strategy::OpenseaSudoArb;
 use opensea_sudo_arb::types::{Action, Config, Event};
 use tracing::{info, Level};
@@ -59,16 +55,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Set up providers. Strategies still use ethers-generated bindings for now, while
-    // core collectors/executors use the migrated Alloy provider boundary.
-    let ws = Ws::connect(args.wss.clone()).await?;
-    let ethers_provider = EthersProvider::new(ws);
-
-    let wallet: LocalWallet = args.private_key.parse().unwrap();
-    let address = wallet.address();
-
-    let ethers_provider = Arc::new(ethers_provider.nonce_manager(address).with_signer(wallet));
-
+    // Set up the Alloy provider used by migrated collectors and executors.
     let alloy_signer: PrivateKeySigner = args.private_key.parse()?;
     let alloy_provider = Arc::new(
         ProviderBuilder::new()
@@ -76,6 +63,8 @@ async fn main() -> Result<()> {
             .connect(&args.wss)
             .await?,
     );
+    let strategy_client =
+        strategy_ethers_bridge::build_strategy_client(&args.wss, &args.private_key).await?;
 
     // Set up opensea client.
     let opensea_client = OpenSeaV2Client::new(OpenSeaApiConfig {
@@ -101,7 +90,7 @@ async fn main() -> Result<()> {
         arb_contract_address: Address::from_str(&args.arb_contract_address)?,
         bid_percentage: args.bid_percentage,
     };
-    let strategy = OpenseaSudoArb::new(ethers_provider.clone(), opensea_client, config);
+    let strategy = OpenseaSudoArb::new(strategy_client, opensea_client, config);
     engine.add_strategy(Box::new(strategy));
 
     // Set up flashbots executor.
@@ -118,4 +107,36 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+mod strategy_ethers_bridge {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use ethers::{
+        middleware::{NonceManagerMiddleware, SignerMiddleware},
+        prelude::MiddlewareBuilder,
+        providers::{Provider as EthersProvider, Ws},
+        signers::{LocalWallet, Signer},
+    };
+
+    pub type StrategyClient =
+        SignerMiddleware<NonceManagerMiddleware<EthersProvider<Ws>>, LocalWallet>;
+
+    /// Compatibility client for the OpenSea sudo strategy's ethers-generated bindings.
+    ///
+    /// Keep ethers construction here until the strategy bindings migrate to Alloy.
+    pub async fn build_strategy_client(
+        wss: &str,
+        private_key: &str,
+    ) -> Result<Arc<StrategyClient>> {
+        let ws = Ws::connect(wss).await?;
+        let provider = EthersProvider::new(ws);
+        let wallet: LocalWallet = private_key.parse()?;
+        let address = wallet.address();
+
+        Ok(Arc::new(
+            provider.nonce_manager(address).with_signer(wallet),
+        ))
+    }
 }
