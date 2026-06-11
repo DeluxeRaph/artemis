@@ -169,10 +169,14 @@ where
 fn alloy_tx_request_to_ethers(tx: &AlloyTransactionRequest) -> Result<TypedTransaction> {
     reject_unsupported_alloy_bundle_fields(tx)?;
 
-    if tx.max_fee_per_gas.is_some() || tx.max_priority_fee_per_gas.is_some() {
+    let is_explicit_eip1559 = tx.transaction_type == Some(2);
+    let has_eip1559_fee_fields =
+        tx.max_fee_per_gas.is_some() || tx.max_priority_fee_per_gas.is_some();
+
+    if is_explicit_eip1559 || has_eip1559_fee_fields {
         if tx.gas_price.is_some() {
             return Err(anyhow!(
-                "bundle transaction request cannot mix gas_price with EIP-1559 fee fields"
+                "bundle transaction request cannot mix gas_price with EIP-1559 transaction type or fee fields"
             ));
         }
 
@@ -377,6 +381,65 @@ mod tests {
             }
             other => panic!("expected EIP-1559 typed transaction, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn alloy_bundle_transaction_request_uses_explicit_eip1559_type_with_fee_fields() {
+        let mut tx = AlloyTransactionRequest::default()
+            .to(address!("2222222222222222222222222222222222222222"))
+            .max_fee_per_gas(2_000_000_000)
+            .max_priority_fee_per_gas(1_000_000_000);
+        tx.transaction_type = Some(2);
+
+        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
+
+        match converted {
+            TypedTransaction::Eip1559(eip1559) => {
+                assert_eq!(eip1559.max_fee_per_gas, Some(2_000_000_000u64.into()));
+                assert_eq!(
+                    eip1559.max_priority_fee_per_gas,
+                    Some(1_000_000_000u64.into())
+                );
+            }
+            other => panic!("expected explicit type 2 to produce EIP-1559, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alloy_bundle_transaction_request_uses_explicit_eip1559_type_without_fee_fields() {
+        let mut tx = AlloyTransactionRequest::default()
+            .to(address!("2222222222222222222222222222222222222222"));
+        tx.transaction_type = Some(2);
+
+        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
+
+        match converted {
+            TypedTransaction::Eip1559(eip1559) => {
+                assert_eq!(
+                    eip1559.to,
+                    Some(
+                        alloy_address_to_ethers(address!(
+                            "2222222222222222222222222222222222222222"
+                        ))
+                        .into()
+                    )
+                );
+                assert_eq!(eip1559.max_fee_per_gas, None);
+                assert_eq!(eip1559.max_priority_fee_per_gas, None);
+            }
+            other => panic!("explicit type 2 must not produce legacy transaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alloy_bundle_transaction_request_rejects_explicit_eip1559_type_with_gas_price() {
+        let mut tx = AlloyTransactionRequest::default().gas_price(1_500_000_000);
+        tx.transaction_type = Some(2);
+
+        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+
+        assert!(err.contains("gas_price"), "unexpected error: {err}");
+        assert!(err.contains("EIP-1559"), "unexpected error: {err}");
     }
 
     #[test]
