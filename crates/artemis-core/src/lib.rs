@@ -33,6 +33,8 @@ pub mod collectors;
 pub mod engine;
 /// This module contains [executor](types::Executor) implementations.
 pub mod executors;
+/// This module contains local MEV-Share wire types.
+pub mod mev_share;
 /// This module contains the core type definitions for Artemis.
 pub mod types;
 /// This module contains utilities for working with Artemis.

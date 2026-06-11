@@ -9,23 +9,18 @@ edition = "2021"
 
 ## eth
 alloy = { workspace = true, features = ["full", "node-bindings"] }
-ethers.workspace = true
 opensea-stream = { git = "https://github.com/FrankieIsLost/opensea-stream-rs"}
-mev-share = "0.1.4"
-ethers-flashbots = { git = "https://github.com/FrankieIsLost/ethers-flashbots", features = ["rustls"] }
 
 ## async
 async-trait = "0.1.64"
-reqwest = { version = "0.11.14", default-features = false, features = ["rustls-tls"] }
+async-sse = "5.1.0"
+reqwest = { version = "0.11.14", default-features = false, features = ["rustls-tls", "json", "stream"] }
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ['sync'] }
 futures-util = "0.3"
-jsonrpsee = { version = "0.18", features = ["client", "async-client"] }
-http = "0.2"
-hyper = "0.14"
 
 ## misc
 anyhow = "1.0.70"
-thiserror = "1.0.40"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing = "0.1.37"
-tower = "0.4.13"

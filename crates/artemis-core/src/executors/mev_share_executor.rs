@@ -1,141 +1,86 @@
-use crate::types::Executor;
+use crate::{
+    mev_share::rpc::{SendBundleRequest, SendBundleResponse},
+    types::Executor,
+};
 use alloy::{primitives::keccak256, signers::Signer as AlloySigner};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use futures_util::future::BoxFuture;
-use http::{header::HeaderValue, HeaderName, Request};
-use hyper::Body;
-use jsonrpsee::http_client::{
-    transport::{self},
-    HttpClientBuilder,
-};
-use mev_share::rpc::{MevApiClient, SendBundleRequest};
-use std::{
-    error::Error,
-    task::{Context, Poll},
-};
-
-use tower::{Layer, Service};
+use reqwest::Url;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::sync::Arc;
 use tracing::{error, info};
 
-const FLASHBOTS_HEADER: HeaderName = HeaderName::from_static("x-flashbots-signature");
+const FLASHBOTS_HEADER: &str = "x-flashbots-signature";
 
-/// Layer that applies Flashbots-style request authentication using an Alloy signer.
-#[derive(Clone)]
-struct AlloyFlashbotsSignerLayer<S> {
-    signer: S,
-}
-
-impl<S> AlloyFlashbotsSignerLayer<S> {
-    fn new(signer: S) -> Self {
-        Self { signer }
-    }
-}
-
-impl<S: Clone, I> Layer<I> for AlloyFlashbotsSignerLayer<S> {
-    type Service = AlloyFlashbotsSigner<S, I>;
-
-    fn layer(&self, inner: I) -> Self::Service {
-        AlloyFlashbotsSigner {
-            signer: self.signer.clone(),
-            inner,
-        }
-    }
-}
-
-/// Middleware that adds the x-flashbots-signature header to JSON POST requests.
-#[derive(Clone)]
-struct AlloyFlashbotsSigner<S, I> {
-    signer: S,
-    inner: I,
-}
-
-impl<S, I> Service<Request<Body>> for AlloyFlashbotsSigner<S, I>
+/// Build a Flashbots-style signature header value from a JSON request body.
+pub(crate) async fn flashbots_signature_header_value<S>(signer: &S, body: &[u8]) -> Result<String>
 where
-    I: Service<Request<Body>> + Clone + Send + 'static,
-    I::Future: Send,
-    I::Error: Into<Box<dyn Error + Send + Sync>> + 'static,
-    S: AlloySigner + Clone + Send + Sync + 'static,
-{
-    type Response = I::Response;
-    type Error = Box<dyn Error + Send + Sync>;
-    type Future = BoxFuture<'static, std::result::Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(Into::into)
-    }
-
-    fn call(&mut self, request: Request<Body>) -> Self::Future {
-        let clone = self.inner.clone();
-        let mut inner = std::mem::replace(&mut self.inner, clone);
-        let signer = self.signer.clone();
-
-        let (mut parts, body) = request.into_parts();
-
-        if parts.method != http::Method::POST {
-            return Box::pin(async move {
-                Err(format!("Invalid method: {}", parts.method.as_str()).into())
-            });
-        }
-
-        let is_json = parts
-            .headers
-            .get(http::header::CONTENT_TYPE)
-            .map(|v| v == HeaderValue::from_static("application/json"))
-            .unwrap_or(false);
-        let has_sig = parts.headers.contains_key(FLASHBOTS_HEADER);
-
-        if !is_json || has_sig {
-            return Box::pin(async move {
-                let request = Request::from_parts(parts, body);
-                inner.call(request).await.map_err(Into::into)
-            });
-        }
-
-        Box::pin(async move {
-            let body_bytes = hyper::body::to_bytes(body).await?;
-            let header = flashbots_signature_header(&signer, body_bytes.as_ref()).await?;
-            parts.headers.insert(FLASHBOTS_HEADER, header);
-
-            let request = Request::from_parts(parts, Body::from(body_bytes.clone()));
-            inner.call(request).await.map_err(Into::into)
-        })
-    }
-}
-
-async fn flashbots_signature_header<S>(signer: &S, body: &[u8]) -> Result<HeaderValue>
-where
-    S: AlloySigner + Sync,
+    S: AlloySigner + Sync + ?Sized,
 {
     let body_hash = keccak256(body);
     let message = format!("{body_hash:#x}");
     let signature = signer.sign_message(message.as_bytes()).await?;
-    Ok(HeaderValue::from_str(&format!(
-        "{}:{}",
-        signer.address(),
-        signature
-    ))?)
+    Ok(format!("{}:{}", signer.address(), signature))
 }
 
-/// An executor that sends bundles to the MEV-share Matchmaker.
+/// An executor that sends bundles to the MEV-Share matchmaker.
 pub struct MevshareExecutor {
-    mev_share_client: Box<dyn MevApiClient + Send + Sync>,
+    relay_url: Url,
+    http: reqwest::Client,
+    signer: Arc<dyn AlloySigner + Send + Sync>,
 }
 
 impl MevshareExecutor {
     pub fn new(signer: impl AlloySigner + Clone + Send + Sync + 'static) -> Self {
-        // Set up flashbots-style auth middleware
-        let http = HttpClientBuilder::default()
-            .set_middleware(
-                tower::ServiceBuilder::new()
-                    .map_err(transport::Error::Http)
-                    .layer(AlloyFlashbotsSignerLayer::new(signer)),
-            )
-            .build("https://relay.flashbots.net:443")
-            .expect("failed to build HTTP client");
+        Self::with_relay_url(signer, "https://relay.flashbots.net:443".parse().unwrap())
+    }
+
+    pub fn with_relay_url(
+        signer: impl AlloySigner + Send + Sync + 'static,
+        relay_url: Url,
+    ) -> Self {
         Self {
-            mev_share_client: Box::new(http),
+            relay_url,
+            http: reqwest::Client::new(),
+            signer: Arc::new(signer),
         }
+    }
+
+    async fn send_bundle(&self, action: SendBundleRequest) -> Result<SendBundleResponse> {
+        let response = self.rpc("mev_sendBundle", json!([action])).await?;
+        Ok(serde_json::from_value(response)?)
+    }
+
+    async fn rpc(&self, method: &str, params: Value) -> Result<Value> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1_u64,
+            "method": method,
+            "params": params,
+        });
+        let body = serde_json::to_vec(&body)?;
+        let signature = flashbots_signature_header_value(self.signer.as_ref(), &body).await?;
+
+        let response = self
+            .http
+            .post(self.relay_url.clone())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(FLASHBOTS_HEADER, signature)
+            .body(body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let value: JsonRpcResponse = response.json().await?;
+        if !status.is_success() {
+            return Err(anyhow!("MEV-Share relay HTTP {status}: {:?}", value.error));
+        }
+        if let Some(error) = value.error {
+            return Err(anyhow!("MEV-Share relay RPC error: {error}"));
+        }
+
+        Ok(value.result.unwrap_or(Value::Null))
     }
 }
 
@@ -143,8 +88,7 @@ impl MevshareExecutor {
 impl Executor<SendBundleRequest> for MevshareExecutor {
     /// Send bundles to the matchmaker.
     async fn execute(&self, action: SendBundleRequest) -> Result<()> {
-        let body = self.mev_share_client.send_bundle(action).await;
-        match body {
+        match self.send_bundle(action).await {
             Ok(body) => info!("Bundle response: {:?}", body),
             Err(e) => error!("Bundle error: {}", e),
         };
@@ -152,10 +96,23 @@ impl Executor<SendBundleRequest> for MevshareExecutor {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonRpcResponse {
+    #[allow(dead_code)]
+    jsonrpc: String,
+    #[allow(dead_code)]
+    id: Value,
+    result: Option<Value>,
+    error: Option<Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::signers::{local::PrivateKeySigner, Signer};
+    use alloy::{
+        primitives::{address, b256, bytes},
+        signers::{local::PrivateKeySigner, Signer},
+    };
 
     #[test]
     fn mevshare_executor_accepts_alloy_signer() {
@@ -168,8 +125,9 @@ mod tests {
         let signer = PrivateKeySigner::random();
         let body = br#"{"jsonrpc":"2.0","method":"mev_sendBundle"}"#;
 
-        let header = flashbots_signature_header(&signer, body).await.unwrap();
-        let header = header.to_str().unwrap();
+        let header = flashbots_signature_header_value(&signer, body)
+            .await
+            .unwrap();
         let (address, signature) = header.split_once(':').unwrap();
 
         let body_hash = keccak256(body);
@@ -184,5 +142,52 @@ mod tests {
                 .unwrap(),
             signer.address()
         );
+    }
+
+    #[test]
+    fn send_bundle_request_serializes_mev_share_wire_shape() {
+        let request = SendBundleRequest::new(
+            1,
+            Some(2),
+            crate::mev_share::rpc::ProtocolVersion::V0_1,
+            vec![
+                crate::mev_share::rpc::BundleItem::Hash {
+                    hash: b256!("1111111111111111111111111111111111111111111111111111111111111111"),
+                },
+                crate::mev_share::rpc::BundleItem::Tx {
+                    tx: bytes!("deadbeef"),
+                    can_revert: false,
+                },
+            ],
+        );
+
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["version"], "v0.1");
+        assert_eq!(json["inclusion"]["block"], "0x1");
+        assert_eq!(json["inclusion"]["maxBlock"], "0x2");
+        assert_eq!(
+            json["body"][0]["hash"],
+            "0x1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        assert_eq!(json["body"][1]["tx"], "0xdeadbeef");
+        assert_eq!(json["body"][1]["canRevert"], false);
+    }
+
+    #[test]
+    fn mev_share_sse_event_deserializes_null_sequences() {
+        let raw = serde_json::json!({
+            "hash": "0x9d525cbf4ed0cd367df93a685da93da036bf5c6d0d6e9e31945779ddbca31d3b",
+            "txs": null,
+            "logs": [{
+                "address": address!("074201cb10b1efedbd8dec271c37687e1ab5be4e"),
+                "topics": ["0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"]
+            }]
+        });
+
+        let event: crate::mev_share::sse::Event = serde_json::from_value(raw).unwrap();
+
+        assert!(event.transactions.is_empty());
+        assert_eq!(event.logs.len(), 1);
     }
 }
