@@ -459,10 +459,12 @@ mod tests {
 
     #[test]
     fn alloy_bundle_transaction_request_rejects_conflicting_input_aliases() {
-        let mut tx = AlloyTransactionRequest::default();
-        tx.input = TransactionInput {
-            input: Some(bytes!("dead").into()),
-            data: Some(bytes!("beef").into()),
+        let tx = AlloyTransactionRequest {
+            input: TransactionInput {
+                input: Some(bytes!("dead")),
+                data: Some(bytes!("beef")),
+            },
+            ..Default::default()
         };
 
         assert!(alloy_tx_request_to_ethers(&tx).is_err());
