@@ -292,6 +292,12 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
 }
 
 fn ethers_typed_tx_to_alloy_request(tx: &TypedTransaction) -> Option<AlloyTransactionRequest> {
+    let (TypedTransaction::Legacy(_) | TypedTransaction::Eip1559(_)) = tx else {
+        // Access-list and other typed transactions need explicit Alloy support; do not
+        // silently drop fields that affect signing or execution semantics.
+        return None;
+    };
+
     let mut request = AlloyTransactionRequest::default();
 
     if let Some(from) = tx.from() {
@@ -324,6 +330,17 @@ fn ethers_typed_tx_to_alloy_request(tx: &TypedTransaction) -> Option<AlloyTransa
         request = request.input(TransactionInput::new(AlloyBytes::from(data.to_vec())));
     }
 
+    if let TypedTransaction::Eip1559(eip1559) = tx {
+        request.transaction_type = Some(2);
+        if let Some(max_fee_per_gas) = eip1559.max_fee_per_gas {
+            request = request.max_fee_per_gas(ethers_u256_to_u128(max_fee_per_gas)?);
+        }
+        if let Some(max_priority_fee_per_gas) = eip1559.max_priority_fee_per_gas {
+            request =
+                request.max_priority_fee_per_gas(ethers_u256_to_u128(max_priority_fee_per_gas)?);
+        }
+    }
+
     Some(request)
 }
 
@@ -348,5 +365,92 @@ fn ethers_u256_to_u128(value: U256) -> Option<u128> {
         None
     } else {
         Some(value.as_u128())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::address;
+    use ethers::types::{
+        transaction::{eip1559::Eip1559TransactionRequest, eip2718::TypedTransaction},
+        Bytes as EthersBytes, TransactionRequest as EthersTransactionRequest,
+    };
+
+    #[test]
+    fn opensea_arb_legacy_typed_tx_conversion_preserves_fields() {
+        let tx = EthersTransactionRequest::new()
+            .from(
+                "1111111111111111111111111111111111111111"
+                    .parse::<H160>()
+                    .unwrap(),
+            )
+            .to("2222222222222222222222222222222222222222"
+                .parse::<H160>()
+                .unwrap())
+            .value(U256::from(1234))
+            .gas(21_000)
+            .nonce(7)
+            .gas_price(1_500_000_000u64)
+            .chain_id(1u64)
+            .data(EthersBytes::from(vec![0xde, 0xad, 0xbe, 0xef]));
+
+        let converted = ethers_typed_tx_to_alloy_request(&TypedTransaction::Legacy(tx)).unwrap();
+
+        assert_eq!(
+            converted.from,
+            Some(address!("1111111111111111111111111111111111111111"))
+        );
+        assert_eq!(
+            *converted.to.unwrap().to().unwrap(),
+            address!("2222222222222222222222222222222222222222")
+        );
+        assert_eq!(converted.value, Some(AlloyU256::from(1234)));
+        assert_eq!(converted.gas, Some(21_000));
+        assert_eq!(converted.nonce, Some(7));
+        assert_eq!(converted.gas_price, Some(1_500_000_000));
+        assert_eq!(converted.chain_id, Some(1));
+        assert_eq!(
+            converted.input.input().unwrap().as_ref(),
+            &[0xde, 0xad, 0xbe, 0xef]
+        );
+    }
+
+    #[test]
+    fn opensea_arb_eip1559_typed_tx_conversion_preserves_fee_fields() {
+        let tx = Eip1559TransactionRequest::new()
+            .from(
+                "1111111111111111111111111111111111111111"
+                    .parse::<H160>()
+                    .unwrap(),
+            )
+            .to("2222222222222222222222222222222222222222"
+                .parse::<H160>()
+                .unwrap())
+            .value(U256::from(1234))
+            .gas(21_000)
+            .nonce(7)
+            .max_fee_per_gas(2_000_000_000u64)
+            .max_priority_fee_per_gas(1_000_000_000u64)
+            .chain_id(1u64)
+            .data(EthersBytes::from(vec![0xca, 0xfe]));
+
+        let converted = ethers_typed_tx_to_alloy_request(&TypedTransaction::Eip1559(tx)).unwrap();
+
+        assert_eq!(
+            converted.from,
+            Some(address!("1111111111111111111111111111111111111111"))
+        );
+        assert_eq!(
+            *converted.to.unwrap().to().unwrap(),
+            address!("2222222222222222222222222222222222222222")
+        );
+        assert_eq!(converted.value, Some(AlloyU256::from(1234)));
+        assert_eq!(converted.gas, Some(21_000));
+        assert_eq!(converted.nonce, Some(7));
+        assert_eq!(converted.max_fee_per_gas, Some(2_000_000_000));
+        assert_eq!(converted.max_priority_fee_per_gas, Some(1_000_000_000));
+        assert_eq!(converted.chain_id, Some(1));
+        assert_eq!(converted.input.input().unwrap().as_ref(), &[0xca, 0xfe]);
     }
 }
