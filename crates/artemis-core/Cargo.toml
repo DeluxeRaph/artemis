@@ -19,6 +19,7 @@ async-trait = "0.1.64"
 reqwest = { version = "0.11.14", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ['sync'] }
+futures-util = "0.3"
 jsonrpsee = { version = "0.18", features = ["client", "async-client"] }
 
 ## misc

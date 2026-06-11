@@ -1170,6 +1170,7 @@ dependencies = [
  "async-trait",
  "ethers",
  "ethers-flashbots",
+ "futures-util",
  "jsonrpsee",
  "mev-share",
  "opensea-stream",
