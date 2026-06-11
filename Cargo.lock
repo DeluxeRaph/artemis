@@ -1171,6 +1171,8 @@ dependencies = [
  "ethers",
  "ethers-flashbots",
  "futures-util",
+ "http 0.2.9",
+ "hyper 0.14.26",
  "jsonrpsee",
  "mev-share",
  "opensea-stream",
@@ -4481,6 +4483,7 @@ dependencies = [
 name = "mev-share-arb"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "anyhow",
  "artemis-core",
  "async-trait",

@@ -7,6 +7,7 @@ use artemis_core::{
     executors::mev_share_executor::MevshareExecutor,
     types::{CollectorMap, ExecutorMap},
 };
+use alloy::signers::local::PrivateKeySigner;
 use clap::Parser;
 use ethers::{
     prelude::MiddlewareBuilder,
@@ -59,7 +60,7 @@ async fn main() -> Result<()> {
     let address = wallet.address();
 
     let provider = Arc::new(provider.nonce_manager(address).with_signer(wallet.clone()));
-    let fb_signer: LocalWallet = args.flashbots_signer.parse().unwrap();
+    let fb_signer: PrivateKeySigner = args.flashbots_signer.parse().unwrap();
 
     // Set up engine.
     let mut engine: Engine<Event, Action> = Engine::default();

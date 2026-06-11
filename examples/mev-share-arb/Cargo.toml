@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 
 
 [dependencies]
+alloy = { version = "2.0.5", features = ["full"] }
 ethers = { version = "2", features = ["ws", "rustls"]}
 tokio = { version = "1.18", features = ["full"] }
 dotenv = "0.15.0"
