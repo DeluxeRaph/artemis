@@ -21,7 +21,7 @@ artemis-core = { git = "https://github.com/paradigmxyz/artemis.git" }
 chainbound-artemis = { git = "https://github.com/paradigmxyz/artemis.git" }
 
 # the following dependencies are also used in this example
-ethers = {  version = "2", features = ["ws", "rustls"] }
+alloy = "2"
 tokio = { version = "1.18", features = ["full"] }
 anyhow = "1.0.70"
 ```
@@ -31,9 +31,13 @@ Then, in your `main.rs`:
 ```rs
 use std::sync::Arc;
 
+use alloy::{
+    network::EthereumWallet,
+    providers::{ProviderBuilder, WsConnect},
+    signers::local::PrivateKeySigner,
+};
 use artemis_core::{engine::Engine, types::ExecutorMap};
 use chainbound_artemis::{Action, EchoExecutor, Event, FiberCollector, StreamType};
-use ethers::{prelude::rand, providers::Provider, signers::LocalWallet};
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
@@ -55,14 +59,24 @@ pub async fn main() -> anyhow::Result<()> {
     let fiber_collector = Box::new(FiberCollector::new(api_key.clone(), stream_type).await);
 
     // Now create the Echo Executor to send your bundles to your desired block builders.
-    // We also need to instantiate a regular HTTP provider middleware, and two signers
+    // We also need to instantiate a provider and two signers
     // (one to actually sign the transactions, one for Flashbots' authentication header)
     //
     // For more info, please refer to the documentation at https://echo.chainbound.io/docs/architecture
-    let provider = Arc::new(Provider::connect("wss://eth.llamarpc.com").await.unwrap());
-    let tx_signer = LocalWallet::new(&mut rand::thread_rng()); // or any other signer
-    let auth_signer = LocalWallet::new(&mut rand::thread_rng()); // or any other signer
-    let echo_executor = Box::new(EchoExecutor::new(provider, tx_signer, auth_signer, api_key));
+    let provider = Arc::new(
+        ProviderBuilder::new()
+            .connect_ws(WsConnect::new("wss://eth.llamarpc.com"))
+            .await
+            .unwrap(),
+    );
+    let tx_signer = PrivateKeySigner::random(); // or any other Alloy signer
+    let auth_signer = PrivateKeySigner::random(); // or any other Alloy signer
+    let echo_executor = Box::new(EchoExecutor::new(
+        provider,
+        EthereumWallet::new(tx_signer),
+        auth_signer,
+        api_key,
+    ));
 
     let executor_map = ExecutorMap::new(echo_executor, |action| match action {
         Action::SendBundle(bundle) => Some(bundle),

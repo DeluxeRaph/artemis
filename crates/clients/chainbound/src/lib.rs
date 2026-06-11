@@ -35,15 +35,13 @@ mod tests {
     use std::sync::Arc;
 
     use alloy::{
+        network::EthereumWallet,
         primitives::{Address, U256},
+        providers::{Provider, ProviderBuilder, WsConnect},
         rpc::types::TransactionRequest,
+        signers::local::PrivateKeySigner,
     };
     use artemis_core::types::Executor;
-    use ethers::{
-        prelude::rand,
-        providers::{Middleware, Provider},
-        signers::{LocalWallet, Signer},
-    };
     use futures::StreamExt;
 
     use crate::{BlockBuilder, EchoExecutor, Event, FiberCollector, SendBundleArgs, StreamType};
@@ -61,12 +59,22 @@ mod tests {
 
             // ==== Create an Echo Executor, and send a random bundle to block builders ====
 
-            let provider = Arc::new(Provider::connect("wss://eth.llamarpc.com").await.unwrap());
-            let tx_signer = LocalWallet::new(&mut rand::thread_rng());
-            let auth_signer = LocalWallet::new(&mut rand::thread_rng());
-            let account = Address::from_slice(tx_signer.address().as_bytes());
+            let provider = Arc::new(
+                ProviderBuilder::new()
+                    .connect_ws(WsConnect::new("wss://eth.llamarpc.com"))
+                    .await
+                    .unwrap(),
+            );
+            let tx_signer = PrivateKeySigner::random();
+            let auth_signer = PrivateKeySigner::random();
+            let account = Address::from_slice(tx_signer.address().as_slice());
 
-            let echo_executor = EchoExecutor::new(provider, tx_signer, auth_signer, api_key);
+            let echo_executor = EchoExecutor::new(
+                provider,
+                EthereumWallet::new(tx_signer),
+                auth_signer,
+                api_key,
+            );
 
             // Fill in the bundle with a random transaction
             let tx = TransactionRequest::default()
@@ -81,7 +89,7 @@ mod tests {
             // Build the bundle with the selected transaction and options.
             // Look at the `SendBundleArgs` struct for info on available methods.
             let mut bundle = SendBundleArgs::with_txs(vec![tx]);
-            bundle.set_block_number(next_block.as_u64());
+            bundle.set_block_number(next_block);
             bundle.set_mev_builders(vec![BlockBuilder::Flashbots, BlockBuilder::Titan]);
             bundle.set_replacement_uuid("a34daefc-e640-48fc-a1c7-352fc518720f".to_string());
             bundle.set_refund_percent(90);

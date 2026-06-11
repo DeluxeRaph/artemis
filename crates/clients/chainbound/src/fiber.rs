@@ -1,7 +1,6 @@
 use alloy::rpc::types::Transaction as AlloyTransaction;
 use anyhow::Result;
 use async_trait::async_trait;
-use ethers::types::Transaction as EthersTransaction;
 use fiber::{
     eth::{CompactBeaconBlock, ExecutionPayload, ExecutionPayloadHeader},
     Client,
@@ -119,12 +118,13 @@ impl Collector<Event> for FiberCollector {
     }
 }
 
-fn fiber_transaction_to_alloy(tx: EthersTransaction) -> Result<FiberTransaction> {
-    let tx_hash = tx.hash;
+fn fiber_transaction_to_alloy<T>(tx: T) -> Result<FiberTransaction>
+where
+    T: serde::Serialize,
+{
     let value = serde_json::to_value(tx)?;
-    serde_json::from_value(value).map_err(|err| {
-        anyhow::anyhow!("failed to convert Fiber transaction {tx_hash:#x} to Alloy: {err}")
-    })
+    serde_json::from_value(value)
+        .map_err(|err| anyhow::anyhow!("failed to convert Fiber transaction to Alloy: {err}"))
 }
 
 #[cfg(test)]
@@ -136,12 +136,9 @@ mod tests {
     };
     use anyhow::Result;
     use artemis_core::engine::Engine;
-    use ethers::types::{
-        transaction::eip2930::{AccessList, AccessListItem},
-        Action, Address as EthersAddress, Bytes as EthersBytes, Transaction as EthersTransaction,
-        H256 as EthersH256, U256 as EthersU256, U64,
-    };
+    use serde_json::json;
 
+    use crate::Action;
     use crate::Event;
     use crate::FiberCollector;
     use crate::StreamType;
@@ -168,37 +165,25 @@ mod tests {
 
     #[test]
     fn fiber_transaction_conversion_preserves_legacy_fields() -> Result<()> {
-        let ethers_tx = EthersTransaction {
-            hash: EthersH256::from_slice(
-                b256!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                    .as_slice(),
-            ),
-            nonce: EthersU256::from(7),
-            block_hash: Some(EthersH256::from_slice(
-                b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                    .as_slice(),
-            )),
-            block_number: Some(U64::from(42)),
-            transaction_index: Some(U64::from(3)),
-            from: EthersAddress::from_slice(
-                address!("1111111111111111111111111111111111111111").as_slice(),
-            ),
-            to: Some(EthersAddress::from_slice(
-                address!("2222222222222222222222222222222222222222").as_slice(),
-            )),
-            value: EthersU256::from(1234),
-            gas_price: Some(EthersU256::from(1_500_000_000u64)),
-            gas: EthersU256::from(21_000),
-            input: EthersBytes::from(bytes!("deadbeef").to_vec()),
-            v: U64::from(37),
-            r: EthersU256::from(1),
-            s: EthersU256::from(2),
-            transaction_type: None,
-            chain_id: Some(EthersU256::from(1)),
-            ..Default::default()
-        };
+        let upstream_tx = json!({
+            "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "nonce": "0x7",
+            "blockHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "blockNumber": "0x2a",
+            "transactionIndex": "0x3",
+            "from": "0x1111111111111111111111111111111111111111",
+            "to": "0x2222222222222222222222222222222222222222",
+            "value": "0x4d2",
+            "gasPrice": "0x59682f00",
+            "gas": "0x5208",
+            "input": "0xdeadbeef",
+            "v": "0x25",
+            "r": "0x1",
+            "s": "0x2",
+            "chainId": "0x1"
+        });
 
-        let alloy_tx = super::fiber_transaction_to_alloy(ethers_tx)?;
+        let alloy_tx = super::fiber_transaction_to_alloy(upstream_tx)?;
 
         assert_eq!(
             alloy_tx.tx_hash(),
@@ -229,41 +214,30 @@ mod tests {
 
     #[test]
     fn fiber_transaction_conversion_preserves_eip1559_fields() -> Result<()> {
-        let ethers_tx = EthersTransaction {
-            hash: EthersH256::from_slice(
-                b256!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
-                    .as_slice(),
-            ),
-            nonce: EthersU256::from(8),
-            from: EthersAddress::from_slice(
-                address!("1111111111111111111111111111111111111111").as_slice(),
-            ),
-            to: Some(EthersAddress::from_slice(
-                address!("2222222222222222222222222222222222222222").as_slice(),
-            )),
-            value: EthersU256::from(5678),
-            gas: EthersU256::from(30_000),
-            input: EthersBytes::from(bytes!("c0ffee").to_vec()),
-            v: U64::from(1),
-            r: EthersU256::from(3),
-            s: EthersU256::from(4),
-            transaction_type: Some(U64::from(2)),
-            access_list: Some(AccessList(vec![AccessListItem {
-                address: EthersAddress::from_slice(
-                    address!("3333333333333333333333333333333333333333").as_slice(),
-                ),
-                storage_keys: vec![EthersH256::from_slice(
-                    b256!("0000000000000000000000000000000000000000000000000000000000000001")
-                        .as_slice(),
-                )],
-            }])),
-            max_priority_fee_per_gas: Some(EthersU256::from(1_000_000_000u64)),
-            max_fee_per_gas: Some(EthersU256::from(2_000_000_000u64)),
-            chain_id: Some(EthersU256::from(1)),
-            ..Default::default()
-        };
+        let upstream_tx = json!({
+            "hash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "nonce": "0x8",
+            "from": "0x1111111111111111111111111111111111111111",
+            "to": "0x2222222222222222222222222222222222222222",
+            "value": "0x162e",
+            "gas": "0x7530",
+            "input": "0xc0ffee",
+            "v": "0x1",
+            "r": "0x3",
+            "s": "0x4",
+            "type": "0x2",
+            "accessList": [{
+                "address": "0x3333333333333333333333333333333333333333",
+                "storageKeys": [
+                    "0x0000000000000000000000000000000000000000000000000000000000000001"
+                ]
+            }],
+            "maxPriorityFeePerGas": "0x3b9aca00",
+            "maxFeePerGas": "0x77359400",
+            "chainId": "0x1"
+        });
 
-        let alloy_tx = super::fiber_transaction_to_alloy(ethers_tx)?;
+        let alloy_tx = super::fiber_transaction_to_alloy(upstream_tx)?;
 
         assert_eq!(
             alloy_tx.tx_hash(),

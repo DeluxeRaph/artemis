@@ -1,20 +1,15 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy::{
-    primitives::{Address as AlloyAddress, TxKind, U256 as AlloyU256},
+    consensus::{TxEnvelope, TypedTransaction},
+    eips::eip2718::Encodable2718,
+    network::{Ethereum, NetworkWallet},
+    providers::Provider,
     rpc::types::TransactionRequest as AlloyTransactionRequest,
+    signers::Signer,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use ethers::{
-    providers::Middleware,
-    signers::Signer,
-    types::{
-        transaction::{eip1559::Eip1559TransactionRequest, eip2718::TypedTransaction},
-        Address as EthersAddress, Bytes as EthersBytes,
-        TransactionRequest as EthersTransactionRequest, U256 as EthersU256,
-    },
-};
 use reqwest::{
     header::{HeaderMap, HeaderValue},
     Client,
@@ -36,28 +31,33 @@ pub enum Action {
 const ECHO_RPC_URL: &str = "https://echo-rpc.chainbound.io";
 
 /// An Echo executor that sends transactions to the specified block builders
-pub struct EchoExecutor<M, S> {
+pub struct EchoExecutor<M, W, A> {
     /// The Echo RPC endpoint
     echo_endpoint: String,
     /// The HTTP client to send requests to the Echo RPC
     echo_client: Client,
-    /// The native ethers middleware
+    /// The Alloy provider used to query chain state.
     inner: Arc<M>,
     /// The signer to sign transactions before sending to the builders
-    tx_signer: S,
+    tx_signer: W,
     /// the signer to compute the `X-Flashbots-Signature` of the bundle payload
-    auth_signer: S,
+    auth_signer: A,
 }
 
-impl<M: Middleware, S: Signer> EchoExecutor<M, S> {
+impl<M, W, A> EchoExecutor<M, W, A>
+where
+    M: Provider,
+    W: NetworkWallet<Ethereum>,
+    A: Signer + Send + Sync,
+{
     /// Initialize a new Echo executor.
     ///
     /// ## Arguments
-    /// - `inner`: The native ethers middleware that can query the blockchain
+    /// - `inner`: The Alloy provider that can query the blockchain
     /// - `tx_signer`: The actual signer of the bundle transactions
     /// - `auth_signer`: The signer to compute the `X-Flashbots-Signature` of the bundle payload
     /// - `api_key`: The Echo API key to use
-    pub fn new(inner: Arc<M>, tx_signer: S, auth_signer: S, api_key: impl Into<String>) -> Self {
+    pub fn new(inner: Arc<M>, tx_signer: W, auth_signer: A, api_key: impl Into<String>) -> Self {
         let mut headers = HeaderMap::new();
         headers.insert("Content-Type", "application/json".parse().unwrap());
         headers.insert("X-Api-Key", api_key.into().parse().expect("Broken API key"));
@@ -82,18 +82,18 @@ impl<M: Middleware, S: Signer> EchoExecutor<M, S> {
         self.echo_endpoint = endpoint.into();
     }
 
-    /// Returns a reference to the native ethers middleware
+    /// Returns a reference to the Alloy provider.
     pub fn provider(&self) -> Arc<M> {
         self.inner.clone()
     }
 }
 
 #[async_trait]
-impl<M, S> Executor<SendBundleArgs> for EchoExecutor<M, S>
+impl<M, W, A> Executor<SendBundleArgs> for EchoExecutor<M, W, A>
 where
-    M: Middleware + 'static,
-    M::Error: 'static,
-    S: Signer + 'static,
+    M: Provider + 'static,
+    W: NetworkWallet<Ethereum> + 'static,
+    A: Signer + Send + Sync + 'static,
 {
     /// Send a bundle to transactions to the specified builders
     async fn execute(&self, mut action: SendBundleArgs) -> Result<()> {
@@ -106,16 +106,15 @@ where
 
         // Sign each transaction in bundle
         for tx in action.unsigned_txs.iter() {
-            let tx = alloy_tx_request_to_ethers(tx)?;
-            let signature = self.tx_signer.sign_transaction(&tx).await?;
-            let signed = tx.rlp_signed(&signature).to_string();
+            let tx = alloy_tx_request_to_typed(tx)?;
+            let signed = sign_transaction(&self.tx_signer, tx).await?;
             action.standard_features.txs.push(signed);
         }
 
         // Set block number to the next block if not specified
         if action.standard_features.block_number.is_none() {
             let block_number = self.inner.get_block_number().await?;
-            let next_block_number_hex = format!("0x{:#x}", block_number.as_u64() + 1);
+            let next_block_number_hex = format!("0x{:x}", block_number + 1);
             action.standard_features.block_number = Some(next_block_number_hex);
         }
 
@@ -123,11 +122,14 @@ where
 
         // Sign bundle payload (without the Echo-specific features)
         let signable_payload = serde_json::to_string(&action.standard_features)?;
-        let flashbots_signature = self.auth_signer.sign_message(&signable_payload).await?;
+        let flashbots_signature = self
+            .auth_signer
+            .sign_message(signable_payload.as_bytes())
+            .await?;
 
         // Create the `X-Flashbots-Signature` header
         let flashbots_signature_header: HeaderValue =
-            format!("{:#x}:{}", self.auth_signer.address(), flashbots_signature).parse()?;
+            format!("{}:{}", self.auth_signer.address(), flashbots_signature).parse()?;
 
         // Prepare the full JSON-RPC request body
         let bundle_json = serde_json::to_string(&action)?;
@@ -166,24 +168,12 @@ where
     }
 }
 
-fn alloy_tx_request_to_ethers(tx: &AlloyTransactionRequest) -> Result<TypedTransaction> {
+fn alloy_tx_request_to_typed(tx: &AlloyTransactionRequest) -> Result<TypedTransaction> {
     reject_unsupported_alloy_bundle_fields(tx)?;
 
-    let is_explicit_eip1559 = tx.transaction_type == Some(2);
-    let has_eip1559_fee_fields =
-        tx.max_fee_per_gas.is_some() || tx.max_priority_fee_per_gas.is_some();
-
-    if is_explicit_eip1559 || has_eip1559_fee_fields {
-        if tx.gas_price.is_some() {
-            return Err(anyhow!(
-                "bundle transaction request cannot mix gas_price with EIP-1559 transaction type or fee fields"
-            ));
-        }
-
-        return Ok(TypedTransaction::Eip1559(alloy_tx_request_to_eip1559(tx)?));
-    }
-
-    Ok(TypedTransaction::Legacy(alloy_tx_request_to_legacy(tx)?))
+    tx.clone().build_typed_tx().map_err(|unbuilt| {
+        anyhow!("bundle transaction request cannot be built for signing: {unbuilt:?}")
+    })
 }
 
 fn reject_unsupported_alloy_bundle_fields(tx: &AlloyTransactionRequest) -> Result<()> {
@@ -222,103 +212,41 @@ fn reject_unsupported_alloy_bundle_fields(tx: &AlloyTransactionRequest) -> Resul
             }
         }
     }
+    let has_eip1559_fee_fields =
+        tx.max_fee_per_gas.is_some() || tx.max_priority_fee_per_gas.is_some();
+    if tx.gas_price.is_some() && (tx.transaction_type == Some(2) || has_eip1559_fee_fields) {
+        return Err(anyhow!(
+            "bundle transaction request cannot mix gas_price with EIP-1559 transaction type or fee fields"
+        ));
+    }
 
     Ok(())
 }
 
-fn alloy_tx_request_to_legacy(tx: &AlloyTransactionRequest) -> Result<EthersTransactionRequest> {
-    let mut request = EthersTransactionRequest::new();
-
-    if let Some(from) = tx.from {
-        request = request.from(alloy_address_to_ethers(from));
-    }
-
-    if let Some(to) = tx.to {
-        match to {
-            TxKind::Call(to) => request = request.to(alloy_address_to_ethers(to)),
-            TxKind::Create => {}
-        }
-    }
-
-    if let Some(value) = tx.value {
-        request = request.value(alloy_u256_to_ethers(value));
-    }
-    if let Some(gas) = tx.gas {
-        request = request.gas(gas);
-    }
-    if let Some(nonce) = tx.nonce {
-        request = request.nonce(nonce);
-    }
-    if let Some(gas_price) = tx.gas_price {
-        request = request.gas_price(gas_price);
-    }
-    if let Some(chain_id) = tx.chain_id {
-        request = request.chain_id(chain_id);
-    }
-    if let Some(input) = tx.input.unique_input()? {
-        request = request.data(EthersBytes::from(input.to_vec()));
-    }
-
-    Ok(request)
+async fn sign_transaction<W>(wallet: &W, tx: TypedTransaction) -> Result<String>
+where
+    W: NetworkWallet<Ethereum>,
+{
+    let signed = wallet.sign_transaction(tx).await?;
+    Ok(encoded_envelope_hex(&signed))
 }
 
-fn alloy_tx_request_to_eip1559(tx: &AlloyTransactionRequest) -> Result<Eip1559TransactionRequest> {
-    let mut request = Eip1559TransactionRequest::new();
-
-    if let Some(from) = tx.from {
-        request = request.from(alloy_address_to_ethers(from));
-    }
-    if let Some(to) = tx.to {
-        match to {
-            TxKind::Call(to) => request = request.to(alloy_address_to_ethers(to)),
-            TxKind::Create => {}
-        }
-    }
-
-    if let Some(value) = tx.value {
-        request = request.value(alloy_u256_to_ethers(value));
-    }
-    if let Some(gas) = tx.gas {
-        request = request.gas(gas);
-    }
-    if let Some(nonce) = tx.nonce {
-        request = request.nonce(nonce);
-    }
-    if let Some(max_fee_per_gas) = tx.max_fee_per_gas {
-        request = request.max_fee_per_gas(EthersU256::from(max_fee_per_gas));
-    }
-    if let Some(max_priority_fee_per_gas) = tx.max_priority_fee_per_gas {
-        request = request.max_priority_fee_per_gas(EthersU256::from(max_priority_fee_per_gas));
-    }
-    if let Some(chain_id) = tx.chain_id {
-        request = request.chain_id(chain_id);
-    }
-    if let Some(input) = tx.input.unique_input()? {
-        request = request.data(EthersBytes::from(input.to_vec()));
-    }
-
-    Ok(request)
-}
-
-fn alloy_address_to_ethers(address: AlloyAddress) -> EthersAddress {
-    EthersAddress::from_slice(address.as_slice())
-}
-
-fn alloy_u256_to_ethers(value: AlloyU256) -> EthersU256 {
-    EthersU256::from_dec_str(&value.to_string()).expect("alloy U256 decimal is valid")
+fn encoded_envelope_hex(envelope: &TxEnvelope) -> String {
+    let mut encoded = Vec::with_capacity(envelope.encode_2718_len());
+    envelope.encode_2718(&mut encoded);
+    format!("0x{}", alloy::hex::encode(encoded))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::{
-        primitives::{address, b256, bytes, U256},
+        primitives::{address, b256, bytes, TxKind, U256},
         rpc::types::{AccessList, AccessListItem, TransactionInput},
     };
-    use ethers::types::transaction::eip2718::TypedTransaction;
 
     #[test]
-    fn alloy_bundle_transaction_request_preserves_fields_for_ethers_signing() {
+    fn alloy_bundle_transaction_request_preserves_fields_for_alloy_signing() {
         let mut tx = AlloyTransactionRequest::default()
             .from(address!("1111111111111111111111111111111111111111"))
             .to(address!("2222222222222222222222222222222222222222"))
@@ -329,31 +257,21 @@ mod tests {
             .input(TransactionInput::new(bytes!("deadbeef")));
         tx.chain_id = Some(1);
 
-        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
+        let converted = alloy_tx_request_to_typed(&tx).unwrap();
 
         let TypedTransaction::Legacy(converted) = converted else {
             panic!("expected legacy typed transaction");
         };
         assert_eq!(
-            converted.from,
-            Some("1111111111111111111111111111111111111111".parse().unwrap())
-        );
-        assert_eq!(
             converted.to,
-            Some(
-                alloy_address_to_ethers(address!("2222222222222222222222222222222222222222"))
-                    .into()
-            )
+            TxKind::Call(address!("2222222222222222222222222222222222222222"))
         );
-        assert_eq!(converted.value, Some(EthersU256::from(1234)));
-        assert_eq!(converted.gas, Some(21_000u64.into()));
-        assert_eq!(converted.nonce, Some(7u64.into()));
-        assert_eq!(converted.gas_price, Some(1_500_000_000u64.into()));
+        assert_eq!(converted.value, U256::from(1234));
+        assert_eq!(converted.gas_limit, 21_000);
+        assert_eq!(converted.nonce, 7);
+        assert_eq!(converted.gas_price, 1_500_000_000);
         assert_eq!(converted.chain_id, Some(1u64.into()));
-        assert_eq!(
-            converted.data,
-            Some(EthersBytes::from(vec![0xde, 0xad, 0xbe, 0xef]))
-        );
+        assert_eq!(converted.input.as_ref(), bytes!("deadbeef").as_ref());
     }
 
     #[test]
@@ -366,18 +284,15 @@ mod tests {
             .max_priority_fee_per_gas(1_000_000_000);
         tx.chain_id = Some(1);
 
-        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
+        let converted = alloy_tx_request_to_typed(&tx).unwrap();
 
         match converted {
             TypedTransaction::Eip1559(eip1559) => {
-                assert_eq!(eip1559.max_fee_per_gas, Some(2_000_000_000u64.into()));
-                assert_eq!(
-                    eip1559.max_priority_fee_per_gas,
-                    Some(1_000_000_000u64.into())
-                );
-                assert_eq!(eip1559.chain_id, Some(1u64.into()));
-                assert_eq!(eip1559.gas, Some(21_000u64.into()));
-                assert_eq!(eip1559.nonce, Some(7u64.into()));
+                assert_eq!(eip1559.max_fee_per_gas, 2_000_000_000);
+                assert_eq!(eip1559.max_priority_fee_per_gas, 1_000_000_000);
+                assert_eq!(eip1559.chain_id, 1);
+                assert_eq!(eip1559.gas_limit, 21_000);
+                assert_eq!(eip1559.nonce, 7);
             }
             other => panic!("expected EIP-1559 typed transaction, got {other:?}"),
         }
@@ -387,48 +302,36 @@ mod tests {
     fn alloy_bundle_transaction_request_uses_explicit_eip1559_type_with_fee_fields() {
         let mut tx = AlloyTransactionRequest::default()
             .to(address!("2222222222222222222222222222222222222222"))
+            .gas_limit(21_000)
+            .nonce(7)
             .max_fee_per_gas(2_000_000_000)
             .max_priority_fee_per_gas(1_000_000_000);
         tx.transaction_type = Some(2);
 
-        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
+        let converted = alloy_tx_request_to_typed(&tx).unwrap();
 
         match converted {
             TypedTransaction::Eip1559(eip1559) => {
-                assert_eq!(eip1559.max_fee_per_gas, Some(2_000_000_000u64.into()));
-                assert_eq!(
-                    eip1559.max_priority_fee_per_gas,
-                    Some(1_000_000_000u64.into())
-                );
+                assert_eq!(eip1559.max_fee_per_gas, 2_000_000_000);
+                assert_eq!(eip1559.max_priority_fee_per_gas, 1_000_000_000);
             }
             other => panic!("expected explicit type 2 to produce EIP-1559, got {other:?}"),
         }
     }
 
     #[test]
-    fn alloy_bundle_transaction_request_uses_explicit_eip1559_type_without_fee_fields() {
+    fn alloy_bundle_transaction_request_rejects_incomplete_explicit_eip1559_type() {
         let mut tx = AlloyTransactionRequest::default()
-            .to(address!("2222222222222222222222222222222222222222"));
+            .to(address!("2222222222222222222222222222222222222222"))
+            .gas_limit(21_000)
+            .nonce(7);
         tx.transaction_type = Some(2);
 
-        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
-
-        match converted {
-            TypedTransaction::Eip1559(eip1559) => {
-                assert_eq!(
-                    eip1559.to,
-                    Some(
-                        alloy_address_to_ethers(address!(
-                            "2222222222222222222222222222222222222222"
-                        ))
-                        .into()
-                    )
-                );
-                assert_eq!(eip1559.max_fee_per_gas, None);
-                assert_eq!(eip1559.max_priority_fee_per_gas, None);
-            }
-            other => panic!("explicit type 2 must not produce legacy transaction, got {other:?}"),
-        }
+        let err = alloy_tx_request_to_typed(&tx).unwrap_err().to_string();
+        assert!(
+            err.contains("max_fee_per_gas") || err.contains("max_priority_fee_per_gas"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -436,7 +339,7 @@ mod tests {
         let mut tx = AlloyTransactionRequest::default().gas_price(1_500_000_000);
         tx.transaction_type = Some(2);
 
-        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+        let err = alloy_tx_request_to_typed(&tx).unwrap_err().to_string();
 
         assert!(err.contains("gas_price"), "unexpected error: {err}");
         assert!(err.contains("EIP-1559"), "unexpected error: {err}");
@@ -453,7 +356,7 @@ mod tests {
             )],
         }]));
 
-        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+        let err = alloy_tx_request_to_typed(&tx).unwrap_err().to_string();
         assert!(err.contains("access_list"), "unexpected error: {err}");
     }
 
@@ -467,6 +370,26 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(alloy_tx_request_to_ethers(&tx).is_err());
+        assert!(alloy_tx_request_to_typed(&tx).is_err());
+    }
+
+    #[tokio::test]
+    async fn alloy_bundle_transaction_signing_returns_raw_2718_hex() {
+        use alloy::{network::EthereumWallet, signers::local::PrivateKeySigner};
+
+        let wallet = EthereumWallet::new(PrivateKeySigner::random());
+        let mut tx = AlloyTransactionRequest::default()
+            .to(address!("2222222222222222222222222222222222222222"))
+            .value(U256::from(1234))
+            .gas_limit(21_000)
+            .nonce(7)
+            .gas_price(1_500_000_000);
+        tx.chain_id = Some(1);
+
+        let typed = alloy_tx_request_to_typed(&tx).unwrap();
+        let signed = sign_transaction(&wallet, typed).await.unwrap();
+
+        assert!(signed.starts_with("0x"), "unexpected signed tx: {signed}");
+        assert!(signed.len() > 2, "signed tx must not be empty");
     }
 }
