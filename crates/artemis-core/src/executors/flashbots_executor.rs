@@ -90,8 +90,7 @@ fn alloy_tx_request_to_ethers(tx: &AlloyTransactionRequest) -> Result<TypedTrans
     reject_unsupported_alloy_bundle_fields(tx)?;
 
     let is_explicit_eip1559 = tx.transaction_type == Some(2);
-    let has_eip1559_fee_fields =
-        tx.max_fee_per_gas.is_some() || tx.max_priority_fee_per_gas.is_some();
+    let has_eip1559_fee_fields = tx.has_eip1559_fields();
 
     if is_explicit_eip1559 || has_eip1559_fee_fields {
         if tx.gas_price.is_some() {
@@ -112,10 +111,7 @@ fn reject_unsupported_alloy_bundle_fields(tx: &AlloyTransactionRequest) -> Resul
             "Flashbots bundle transaction request contains unsupported access_list; access-list bundle signing is not yet implemented"
         ));
     }
-    if tx.max_fee_per_blob_gas.is_some()
-        || tx.blob_versioned_hashes.is_some()
-        || tx.sidecar.is_some()
-    {
+    if tx.has_eip4844_fields() {
         return Err(anyhow!(
             "Flashbots bundle transaction request contains unsupported EIP-4844 blob fields"
         ));
@@ -288,17 +284,34 @@ mod tests {
     #[test]
     fn flashbots_bundle_transaction_request_preserves_eip1559_fee_fields() {
         let mut tx = TransactionRequest::default()
+            .from(address!("1111111111111111111111111111111111111111"))
             .to(address!("2222222222222222222222222222222222222222"))
+            .value(U256::from(1234))
             .gas_limit(21_000)
             .nonce(7)
             .max_fee_per_gas(2_000_000_000)
-            .max_priority_fee_per_gas(1_000_000_000);
+            .max_priority_fee_per_gas(1_000_000_000)
+            .input(TransactionInput::new(bytes!("deadbeef")));
         tx.chain_id = Some(1);
 
         let converted = alloy_tx_request_to_ethers(&tx).unwrap();
 
         match converted {
             TypedTransaction::Eip1559(eip1559) => {
+                assert_eq!(
+                    eip1559.from,
+                    Some("1111111111111111111111111111111111111111".parse().unwrap())
+                );
+                assert_eq!(
+                    eip1559.to,
+                    Some(
+                        alloy_address_to_ethers(address!(
+                            "2222222222222222222222222222222222222222"
+                        ))
+                        .into()
+                    )
+                );
+                assert_eq!(eip1559.value, Some(EthersU256::from(1234)));
                 assert_eq!(eip1559.max_fee_per_gas, Some(2_000_000_000u64.into()));
                 assert_eq!(
                     eip1559.max_priority_fee_per_gas,
@@ -307,13 +320,37 @@ mod tests {
                 assert_eq!(eip1559.chain_id, Some(1u64.into()));
                 assert_eq!(eip1559.gas, Some(21_000u64.into()));
                 assert_eq!(eip1559.nonce, Some(7u64.into()));
+                assert_eq!(
+                    eip1559.data,
+                    Some(EthersBytes::from(vec![0xde, 0xad, 0xbe, 0xef]))
+                );
             }
             other => panic!("expected EIP-1559 typed transaction, got {other:?}"),
         }
     }
 
     #[test]
-    fn flashbots_bundle_transaction_request_rejects_unsupported_fields() {
+    fn flashbots_bundle_transaction_request_preserves_contract_creation() {
+        let tx = TransactionRequest::default()
+            .create()
+            .gas_limit(100_000)
+            .input(TransactionInput::new(bytes!("60806040")));
+
+        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
+
+        let TypedTransaction::Legacy(converted) = converted else {
+            panic!("expected legacy typed transaction");
+        };
+        assert_eq!(converted.to, None);
+        assert_eq!(converted.gas, Some(100_000u64.into()));
+        assert_eq!(
+            converted.data,
+            Some(EthersBytes::from(vec![0x60, 0x80, 0x60, 0x40]))
+        );
+    }
+
+    #[test]
+    fn flashbots_bundle_transaction_request_rejects_access_lists() {
         let mut tx =
             TransactionRequest::default().to(address!("2222222222222222222222222222222222222222"));
         tx.access_list = Some(AccessList(vec![AccessListItem {
@@ -326,6 +363,107 @@ mod tests {
         let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
 
         assert!(err.contains("access_list"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn flashbots_bundle_transaction_request_rejects_eip2930_type() {
+        let tx = TransactionRequest::default().transaction_type(1);
+
+        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+
+        assert!(
+            err.contains("unsupported transaction_type 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flashbots_bundle_transaction_request_rejects_blob_fields() {
+        let tx = TransactionRequest::default().max_fee_per_blob_gas(1);
+
+        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+
+        assert!(
+            err.contains("EIP-4844 blob fields"),
+            "unexpected error: {err}"
+        );
+
+        let tx = TransactionRequest {
+            blob_versioned_hashes: Some(vec![b256!(
+                "0000000000000000000000000000000000000000000000000000000000000001"
+            )]),
+            ..Default::default()
+        };
+
+        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+
+        assert!(
+            err.contains("EIP-4844 blob fields"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flashbots_bundle_transaction_request_rejects_authorization_lists() {
+        let tx = TransactionRequest {
+            authorization_list: Some(vec![]),
+            ..Default::default()
+        };
+
+        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+
+        assert!(
+            err.contains("authorization_list"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flashbots_bundle_transaction_request_rejects_legacy_type_with_eip1559_fees() {
+        let tx = TransactionRequest::default()
+            .transaction_type(0)
+            .max_fee_per_gas(2_000_000_000);
+
+        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+
+        assert!(
+            err.contains(
+                "legacy Flashbots bundle transaction request cannot contain EIP-1559 fee fields"
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flashbots_bundle_transaction_request_rejects_mixed_legacy_and_eip1559_fees() {
+        let tx = TransactionRequest::default()
+            .gas_price(1_000_000_000)
+            .max_fee_per_gas(2_000_000_000);
+
+        let err = alloy_tx_request_to_ethers(&tx).unwrap_err().to_string();
+
+        assert!(
+            err.contains("cannot mix gas_price with EIP-1559"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flashbots_bundle_transaction_request_uses_explicit_eip1559_type() {
+        let tx = TransactionRequest::default()
+            .transaction_type(2)
+            .gas_limit(21_000);
+
+        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
+
+        match converted {
+            TypedTransaction::Eip1559(eip1559) => {
+                assert_eq!(eip1559.gas, Some(21_000u64.into()));
+                assert_eq!(eip1559.max_fee_per_gas, None);
+                assert_eq!(eip1559.max_priority_fee_per_gas, None);
+            }
+            other => panic!("expected EIP-1559 typed transaction, got {other:?}"),
+        }
     }
 
     #[test]
