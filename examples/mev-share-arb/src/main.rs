@@ -1,4 +1,5 @@
 use alloy::primitives::Address;
+use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::Result;
 use artemis_core::{
@@ -47,8 +48,8 @@ async fn main() -> Result<()> {
 
     // Set up the Alloy signer used by the migrated MEV-share executor.
     let fb_signer: PrivateKeySigner = args.flashbots_signer.parse()?;
-    let (strategy_client, strategy_wallet) =
-        strategy_ethers_bridge::build_strategy_client(&args.wss, &args.private_key).await?;
+    let strategy_signer: PrivateKeySigner = args.private_key.parse()?;
+    let strategy_client = ProviderBuilder::new().connect(&args.wss).await?;
 
     // Set up engine.
     let mut engine: Engine<Event, Action> = Engine::default();
@@ -61,7 +62,11 @@ async fn main() -> Result<()> {
     engine.add_collector(Box::new(mevshare_collector));
 
     // Set up strategy.
-    let strategy = MevShareUniArb::new(strategy_client, strategy_wallet, args.arb_contract_address);
+    let strategy = MevShareUniArb::new(
+        std::sync::Arc::new(strategy_client),
+        strategy_signer,
+        args.arb_contract_address,
+    );
     engine.add_strategy(Box::new(strategy));
 
     // Set up executor.
@@ -79,36 +84,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-mod strategy_ethers_bridge {
-    use std::sync::Arc;
-
-    use anyhow::Result;
-    use ethers::{
-        middleware::{NonceManagerMiddleware, SignerMiddleware},
-        prelude::MiddlewareBuilder,
-        providers::{Provider as EthersProvider, Ws},
-        signers::{LocalWallet, Signer},
-    };
-
-    pub type StrategyClient =
-        SignerMiddleware<NonceManagerMiddleware<EthersProvider<Ws>>, LocalWallet>;
-
-    /// Compatibility client for the MEV-share strategy's ethers-shaped upstream APIs.
-    ///
-    /// Keep ethers construction here until the strategy and MEV-share request types
-    /// can move fully to Alloy.
-    pub async fn build_strategy_client(
-        wss: &str,
-        private_key: &str,
-    ) -> Result<(Arc<StrategyClient>, LocalWallet)> {
-        let ws = Ws::connect(wss).await?;
-        let provider = EthersProvider::new(ws);
-        let wallet: LocalWallet = private_key.parse()?;
-        let address = wallet.address();
-        let client = provider.nonce_manager(address).with_signer(wallet.clone());
-
-        Ok((Arc::new(client), wallet))
-    }
 }

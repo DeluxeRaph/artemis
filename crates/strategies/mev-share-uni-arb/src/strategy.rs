@@ -1,23 +1,21 @@
 use std::collections::HashMap;
-use std::ops::Add;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use alloy::primitives::{Address as AlloyAddress, Bytes as AlloyBytes, U256 as AlloyU256};
+use alloy::consensus::{SignableTransaction, TxLegacy};
+use alloy::eips::eip2718::Encodable2718;
+use alloy::network::{TransactionBuilder, TxSigner};
+use alloy::primitives::{
+    Address as AlloyAddress, Bytes as AlloyBytes, Signature, U256 as AlloyU256,
+};
+use alloy::providers::Provider;
+use alloy::rpc::types::TransactionRequest;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use anyhow::Result;
 use artemis_core::types::Strategy;
-
-use ethers::signers::Signer;
-
-use ethers::providers::Middleware;
-use ethers::types::transaction::eip2718::TypedTransaction;
-use ethers::types::TransactionRequest;
-use ethers::types::H256;
-use ethers::types::{H160, U256};
 use mev_share::rpc::{BundleItem, Inclusion, SendBundleRequest};
 use tracing::info;
 
@@ -54,7 +52,7 @@ pub struct V2PoolInfo {
 
 #[derive(Debug, Clone)]
 pub struct MevShareUniArb<M, S> {
-    /// Ethers client.
+    /// Alloy provider.
     client: Arc<M>,
     /// Maps uni v3 pool address to v2 pool information.
     pool_map: HashMap<AlloyAddress, V2PoolInfo>,
@@ -64,7 +62,17 @@ pub struct MevShareUniArb<M, S> {
     arb_contract_address: AlloyAddress,
 }
 
-impl<M: Middleware + 'static, S: Signer> MevShareUniArb<M, S> {
+struct SignedArbParams {
+    v2_pool: AlloyAddress,
+    v3_address: AlloyAddress,
+    size: AlloyU256,
+    payment_percentage: AlloyU256,
+    is_weth_token0: bool,
+    bid_gas_price: u128,
+    chain_id: u64,
+}
+
+impl<M: Provider + 'static, S: TxSigner<Signature>> MevShareUniArb<M, S> {
     /// Create a new instance of the strategy.
     pub fn new(client: Arc<M>, signer: S, arb_contract_address: AlloyAddress) -> Self {
         Self {
@@ -77,7 +85,7 @@ impl<M: Middleware + 'static, S: Signer> MevShareUniArb<M, S> {
 }
 
 #[async_trait]
-impl<M: Middleware + 'static, S: Signer + 'static> Strategy<Event, Action>
+impl<M: Provider + 'static, S: TxSigner<Signature> + Send + Sync + 'static> Strategy<Event, Action>
     for MevShareUniArb<M, S>
 {
     /// Initialize the strategy. This is called once at startup, and loads
@@ -112,7 +120,7 @@ impl<M: Middleware + 'static, S: Signer + 'static> Strategy<Event, Action>
                 if event.logs.is_empty() {
                     return vec![];
                 }
-                let address = alloy_address(event.logs[0].address);
+                let address = alloy_address_from_mev(event.logs[0].address.as_fixed_bytes());
                 // skip if address is not a v3 pool
                 if !self.pool_map.contains_key(&address) {
                     return vec![];
@@ -122,7 +130,7 @@ impl<M: Middleware + 'static, S: Signer + 'static> Strategy<Event, Action>
                     "Found a v3 pool match at address {:?}, submitting bundles",
                     address
                 );
-                self.generate_bundles(address, event.hash)
+                self.generate_bundles(address, &event)
                     .await
                     .into_iter()
                     .map(Action::SubmitBundle)
@@ -132,12 +140,12 @@ impl<M: Middleware + 'static, S: Signer + 'static> Strategy<Event, Action>
     }
 }
 
-impl<M: Middleware + 'static, S: Signer + 'static> MevShareUniArb<M, S> {
+impl<M: Provider + 'static, S: TxSigner<Signature> + Send + Sync + 'static> MevShareUniArb<M, S> {
     /// Generate a series of bundles of varying sizes to submit to the matchmaker.
     pub async fn generate_bundles(
         &self,
         v3_address: AlloyAddress,
-        tx_hash: H256,
+        event: &mev_share::sse::Event,
     ) -> Vec<SendBundleRequest> {
         let mut bundles = Vec::new();
         let v2_info = self.pool_map.get(&v3_address).unwrap();
@@ -145,71 +153,62 @@ impl<M: Middleware + 'static, S: Signer + 'static> MevShareUniArb<M, S> {
         // The sizes of the backruns we want to submit.
         // TODO: Run some analysis to figure out likely sizes.
         let sizes = vec![
-            U256::from(100000_u128),
-            U256::from(1000000_u128),
-            U256::from(10000000_u128),
-            U256::from(100000000_u128),
-            U256::from(1000000000_u128),
-            U256::from(10000000000_u128),
-            U256::from(100000000000_u128),
-            U256::from(1000000000000_u128),
-            U256::from(10000000000000_u128),
-            U256::from(100000000000000_u128),
-            U256::from(1000000000000000_u128),
-            U256::from(10000000000000000_u128),
-            U256::from(100000000000000000_u128),
-            U256::from(1000000000000000000_u128),
+            AlloyU256::from(100000_u128),
+            AlloyU256::from(1000000_u128),
+            AlloyU256::from(10000000_u128),
+            AlloyU256::from(100000000_u128),
+            AlloyU256::from(1000000000_u128),
+            AlloyU256::from(10000000000_u128),
+            AlloyU256::from(100000000000_u128),
+            AlloyU256::from(1000000000000_u128),
+            AlloyU256::from(10000000000000_u128),
+            AlloyU256::from(100000000000000_u128),
+            AlloyU256::from(1000000000000000_u128),
+            AlloyU256::from(10000000000000000_u128),
+            AlloyU256::from(100000000000000000_u128),
+            AlloyU256::from(1000000000000000000_u128),
         ];
 
         // Set parameters for the backruns.
-        let payment_percentage = U256::from(0);
+        let payment_percentage = AlloyU256::ZERO;
         let bid_gas_price = self.client.get_gas_price().await.unwrap();
         let block_num = self.client.get_block_number().await.unwrap();
+        let chain_id = self.client.get_chain_id().await.unwrap();
 
         for size in sizes {
-            let arb_tx = {
-                // Construct arb tx based on whether the v2 pool has weth as token0.
-                let mut inner = build_arb_transaction(
-                    self.arb_contract_address,
-                    v2_info.v2_pool,
+            let arb_tx = match self
+                .build_signed_arb_transaction(SignedArbParams {
+                    v2_pool: v2_info.v2_pool,
                     v3_address,
                     size,
                     payment_percentage,
-                    v2_info.is_weth_token0,
-                );
-                // Set gas parameters (this is a bit hacky)
-                inner.set_gas(400000);
-                inner.set_gas_price(bid_gas_price);
-                let fill = self.client.fill_transaction(&mut inner, None).await;
-
-                match fill {
-                    Ok(_) => {}
-                    Err(e) => {
-                        println!("Error filling tx: {}", e);
-                        continue;
-                    }
+                    is_weth_token0: v2_info.is_weth_token0,
+                    bid_gas_price,
+                    chain_id,
+                })
+                .await
+            {
+                Ok(tx) => tx,
+                Err(e) => {
+                    println!("Error building signed tx: {}", e);
+                    continue;
                 }
-
-                inner
             };
-            info!("generated arb tx: {:?}", arb_tx);
+            info!("generated signed arb tx: {:?}", arb_tx);
 
-            // Sign tx and construct bundle
-            let signature = self.tx_signer.sign_transaction(&arb_tx).await.unwrap();
-            let bytes = arb_tx.rlp_signed(&signature);
             let txs = vec![
-                BundleItem::Hash { hash: tx_hash },
+                BundleItem::Hash { hash: event.hash },
                 BundleItem::Tx {
-                    tx: bytes,
+                    tx: arb_tx.to_vec().into(),
                     can_revert: false,
                 },
             ];
             let bundle = SendBundleRequest {
                 bundle_body: txs,
                 inclusion: Inclusion {
-                    block: block_num.add(1),
+                    block: (block_num + 1).into(),
                     // set a large validity window to ensure builder gets a chance to include bundle.
-                    max_block: Some(block_num.add(30)),
+                    max_block: Some((block_num + 30).into()),
                 },
                 ..Default::default()
             };
@@ -218,38 +217,61 @@ impl<M: Middleware + 'static, S: Signer + 'static> MevShareUniArb<M, S> {
         }
         bundles
     }
+
+    async fn build_signed_arb_transaction(&self, params: SignedArbParams) -> Result<AlloyBytes> {
+        let nonce = self
+            .client
+            .get_transaction_count(self.tx_signer.address())
+            .await?;
+        let mut arb_tx = {
+            // Construct arb tx based on whether the v2 pool has weth as token0.
+            let inner = build_arb_transaction(
+                self.arb_contract_address,
+                params.v2_pool,
+                params.v3_address,
+                params.size,
+                params.payment_percentage,
+                params.is_weth_token0,
+            )
+            .gas_limit(400000)
+            .gas_price(params.bid_gas_price)
+            .nonce(nonce)
+            .with_chain_id(params.chain_id);
+
+            tx_request_to_legacy(inner)?
+        };
+
+        let signature = self.tx_signer.sign_transaction(&mut arb_tx).await?;
+        Ok(arb_tx.into_signed(signature).encoded_2718().into())
+    }
 }
 
 fn build_arb_transaction(
     arb_contract_address: AlloyAddress,
     v2_pool: AlloyAddress,
     v3_pool: AlloyAddress,
-    amount_in: U256,
-    payment_percentage: U256,
+    amount_in: AlloyU256,
+    payment_percentage: AlloyU256,
     is_weth_token0: bool,
-) -> TypedTransaction {
-    TransactionRequest::new()
-        .to(ethers_address(arb_contract_address))
-        .data(encode_arb_call(
+) -> TransactionRequest {
+    TransactionRequest::default()
+        .with_to(arb_contract_address)
+        .with_input(encode_arb_call(
             v2_pool,
             v3_pool,
             amount_in,
             payment_percentage,
             is_weth_token0,
         ))
-        .into()
 }
 
 fn encode_arb_call(
     v2_pool: AlloyAddress,
     v3_pool: AlloyAddress,
-    amount_in: U256,
-    payment_percentage: U256,
+    amount_in: AlloyU256,
+    payment_percentage: AlloyU256,
     is_weth_token0: bool,
-) -> ethers::types::Bytes {
-    let amount_in = alloy_u256(amount_in);
-    let payment_percentage = alloy_u256(payment_percentage);
-
+) -> AlloyBytes {
     let encoded = if is_weth_token0 {
         BlindArb::executeArb__WETH_token0Call {
             v2Pair: v2_pool,
@@ -271,104 +293,77 @@ fn encode_arb_call(
     AlloyBytes::from(encoded).to_vec().into()
 }
 
-fn alloy_address(value: H160) -> AlloyAddress {
-    AlloyAddress::from_slice(value.as_fixed_bytes())
+fn tx_request_to_legacy(tx: TransactionRequest) -> Result<TxLegacy> {
+    Ok(tx.build_legacy()?)
 }
 
-fn ethers_address(value: AlloyAddress) -> H160 {
-    H160::from_slice(value.as_slice())
-}
-
-fn alloy_u256(value: U256) -> AlloyU256 {
-    let mut bytes = [0_u8; 32];
-    value.to_big_endian(&mut bytes);
-    AlloyU256::from_be_bytes(bytes)
+fn alloy_address_from_mev(value: &[u8; 20]) -> AlloyAddress {
+    AlloyAddress::from_slice(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ethers::abi::{Function, Param, ParamType, StateMutability, Token};
-    use ethers::types::NameOrAddress;
-
-    fn ethers_test_address(byte: u8) -> H160 {
-        H160::repeat_byte(byte)
-    }
+    use alloy::primitives::TxKind;
 
     fn alloy_test_address(byte: u8) -> AlloyAddress {
         AlloyAddress::repeat_byte(byte)
     }
 
-    #[allow(deprecated)]
-    fn arb_function(name: &str) -> Function {
-        Function {
-            name: name.to_string(),
-            inputs: vec![
-                Param {
-                    name: "v2Pair".to_string(),
-                    kind: ParamType::Address,
-                    internal_type: None,
-                },
-                Param {
-                    name: "v3Pair".to_string(),
-                    kind: ParamType::Address,
-                    internal_type: None,
-                },
-                Param {
-                    name: "amountIn".to_string(),
-                    kind: ParamType::Uint(256),
-                    internal_type: None,
-                },
-                Param {
-                    name: "percentageToPayToCoinbase".to_string(),
-                    kind: ParamType::Uint(256),
-                    internal_type: None,
-                },
-            ],
-            outputs: vec![],
-            constant: None,
-            state_mutability: StateMutability::NonPayable,
-        }
+    fn assert_arb_call(
+        encoded: AlloyBytes,
+        selector: [u8; 4],
+        v2_byte: u8,
+        v3_byte: u8,
+        amount_in: AlloyU256,
+        payment_percentage: AlloyU256,
+    ) {
+        assert_eq!(&encoded[..4], selector.as_slice());
+        assert_eq!(&encoded[4..16], [0_u8; 12]);
+        assert_eq!(&encoded[16..36], [v2_byte; 20]);
+        assert_eq!(&encoded[36..48], [0_u8; 12]);
+        assert_eq!(&encoded[48..68], [v3_byte; 20]);
+        assert_eq!(&encoded[68..100], amount_in.to_be_bytes::<32>().as_slice());
+        assert_eq!(
+            &encoded[100..132],
+            payment_percentage.to_be_bytes::<32>().as_slice()
+        );
     }
 
     #[test]
-    fn alloy_encoder_matches_ethers_abi_for_token0() {
+    fn alloy_encoder_preserves_token0_call_fields() {
         let v2_pool = alloy_test_address(0x11);
         let v3_pool = alloy_test_address(0x22);
-        let amount_in = U256::from_dec_str("1000000000000000000").unwrap();
-        let payment_percentage = U256::from(5_u64);
+        let amount_in = AlloyU256::from(1000000000000000000_u128);
+        let payment_percentage = AlloyU256::from(5_u64);
 
         let encoded = encode_arb_call(v2_pool, v3_pool, amount_in, payment_percentage, true);
-        let expected = arb_function("executeArb__WETH_token0")
-            .encode_input(&[
-                Token::Address(ethers_test_address(0x11)),
-                Token::Address(ethers_test_address(0x22)),
-                Token::Uint(amount_in),
-                Token::Uint(payment_percentage),
-            ])
-            .unwrap();
-
-        assert_eq!(encoded.as_ref(), expected.as_slice());
+        assert_arb_call(
+            encoded,
+            [0x43, 0x3f, 0x1e, 0x90],
+            0x11,
+            0x22,
+            amount_in,
+            payment_percentage,
+        );
     }
 
     #[test]
-    fn alloy_encoder_matches_ethers_abi_for_token1() {
+    fn alloy_encoder_preserves_token1_call_fields() {
         let v2_pool = alloy_test_address(0x33);
         let v3_pool = alloy_test_address(0x44);
-        let amount_in = U256::from(123456789_u64);
-        let payment_percentage = U256::zero();
+        let amount_in = AlloyU256::from(123456789_u64);
+        let payment_percentage = AlloyU256::ZERO;
 
         let encoded = encode_arb_call(v2_pool, v3_pool, amount_in, payment_percentage, false);
-        let expected = arb_function("executeArb__WETH_token1")
-            .encode_input(&[
-                Token::Address(ethers_test_address(0x33)),
-                Token::Address(ethers_test_address(0x44)),
-                Token::Uint(amount_in),
-                Token::Uint(payment_percentage),
-            ])
-            .unwrap();
-
-        assert_eq!(encoded.as_ref(), expected.as_slice());
+        assert_arb_call(
+            encoded,
+            [0x65, 0xc8, 0x05, 0x3b],
+            0x33,
+            0x44,
+            amount_in,
+            payment_percentage,
+        );
     }
 
     #[test]
@@ -376,8 +371,8 @@ mod tests {
         let arb_contract = alloy_test_address(0xaa);
         let v2_pool = alloy_test_address(0xbb);
         let v3_pool = alloy_test_address(0xcc);
-        let amount_in = U256::from(42_u64);
-        let payment_percentage = U256::from(7_u64);
+        let amount_in = AlloyU256::from(42_u64);
+        let payment_percentage = AlloyU256::from(7_u64);
 
         let tx = build_arb_transaction(
             arb_contract,
@@ -389,23 +384,46 @@ mod tests {
         );
 
         assert_eq!(
-            tx.to(),
-            Some(&NameOrAddress::Address(ethers_address(arb_contract))),
+            tx.to,
+            Some(TxKind::Call(arb_contract)),
             "arb contract target must be preserved"
         );
         assert_eq!(
-            tx.data().unwrap().as_ref(),
+            tx.input.input().unwrap().as_ref(),
             encode_arb_call(v2_pool, v3_pool, amount_in, payment_percentage, true).as_ref(),
             "calldata must be preserved"
         );
-        assert!(tx.gas().is_none(), "gas is filled after tx construction");
+        assert!(tx.gas.is_none(), "gas is filled after tx construction");
         assert!(
-            tx.gas_price().is_none(),
+            tx.gas_price.is_none(),
             "gas price is filled after tx construction"
         );
         assert!(
-            tx.access_list().is_none(),
+            tx.access_list.is_none(),
             "legacy transaction should not silently carry an access list"
         );
+    }
+
+    #[test]
+    fn tx_request_to_legacy_preserves_filled_fields() {
+        let to = alloy_test_address(0xaa);
+        let input = AlloyBytes::from(vec![1, 2, 3]);
+        let tx = TransactionRequest::default()
+            .with_to(to)
+            .with_input(input.clone())
+            .gas_limit(400000)
+            .gas_price(10)
+            .nonce(3)
+            .with_chain_id(1);
+
+        let legacy = tx_request_to_legacy(tx).unwrap();
+
+        assert_eq!(legacy.to, TxKind::Call(to));
+        assert_eq!(legacy.input, input);
+        assert_eq!(legacy.gas_limit, 400000);
+        assert_eq!(legacy.gas_price, 10);
+        assert_eq!(legacy.nonce, 3);
+        assert_eq!(legacy.chain_id, Some(1));
+        assert_eq!(legacy.value, AlloyU256::ZERO);
     }
 }
