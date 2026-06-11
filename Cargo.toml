@@ -15,7 +15,6 @@ default-members = ["bin/artemis", "bin/cli"]
 ## eth
 alloy = "2.0.5"
 alloy-primitives = "1.6.0"
-ethers = { version = "2", features = ["ws", "rustls"]}
 
 
 [profile.release]

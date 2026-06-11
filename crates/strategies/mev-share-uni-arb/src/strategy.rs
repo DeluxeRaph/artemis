@@ -15,8 +15,11 @@ use alloy::rpc::types::TransactionRequest;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 use anyhow::Result;
+use artemis_core::mev_share::{
+    rpc::{BundleItem, Inclusion, SendBundleRequest},
+    sse,
+};
 use artemis_core::types::Strategy;
-use mev_share::rpc::{BundleItem, Inclusion, SendBundleRequest};
 use tracing::info;
 
 use crate::types::V2V3PoolRecord;
@@ -120,7 +123,7 @@ impl<M: Provider + 'static, S: TxSigner<Signature> + Send + Sync + 'static> Stra
                 if event.logs.is_empty() {
                     return vec![];
                 }
-                let address = alloy_address_from_mev(event.logs[0].address.as_fixed_bytes());
+                let address = event.logs[0].address;
                 // skip if address is not a v3 pool
                 if !self.pool_map.contains_key(&address) {
                     return vec![];
@@ -145,7 +148,7 @@ impl<M: Provider + 'static, S: TxSigner<Signature> + Send + Sync + 'static> MevS
     pub async fn generate_bundles(
         &self,
         v3_address: AlloyAddress,
-        event: &mev_share::sse::Event,
+        event: &sse::Event,
     ) -> Vec<SendBundleRequest> {
         let mut bundles = Vec::new();
         let v2_info = self.pool_map.get(&v3_address).unwrap();
@@ -206,9 +209,9 @@ impl<M: Provider + 'static, S: TxSigner<Signature> + Send + Sync + 'static> MevS
             let bundle = SendBundleRequest {
                 bundle_body: txs,
                 inclusion: Inclusion {
-                    block: (block_num + 1).into(),
+                    block: block_num + 1,
                     // set a large validity window to ensure builder gets a chance to include bundle.
-                    max_block: Some((block_num + 30).into()),
+                    max_block: Some(block_num + 30),
                 },
                 ..Default::default()
             };
@@ -295,10 +298,6 @@ fn encode_arb_call(
 
 fn tx_request_to_legacy(tx: TransactionRequest) -> Result<TxLegacy> {
     Ok(tx.build_legacy()?)
-}
-
-fn alloy_address_from_mev(value: &[u8; 20]) -> AlloyAddress {
-    AlloyAddress::from_slice(value)
 }
 
 #[cfg(test)]

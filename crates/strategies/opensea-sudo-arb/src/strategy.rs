@@ -20,8 +20,8 @@ use anyhow::Result;
 use artemis_core::collectors::block_collector::NewBlock;
 use artemis_core::collectors::opensea_order_collector::OpenseaOrder;
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
+use artemis_core::opensea_stream::schema::Chain;
 use artemis_core::types::Strategy;
-use opensea_stream::schema::Chain;
 use opensea_v2::client::OpenSeaV2Client;
 
 use super::constants::{LSSVM_PAIR_FACTORY_ADDRESS, POOL_EVENT_SIGNATURES};
@@ -125,7 +125,7 @@ impl<M: Provider + Send + Sync + 'static> Strategy<Event, Action> for OpenseaSud
 impl<M: Provider + Send + Sync + 'static> OpenseaSudoArb<M> {
     // Process new orders as they come in.
     async fn process_order_event(&mut self, event: OpenseaOrder) -> Option<Action> {
-        let nft_address = Address::from_slice(event.listing.context.item.nft_id.address.as_bytes());
+        let nft_address = event.listing.context.item.nft_id.address;
         info!("processing order event for address {}", nft_address);
 
         // Ignore orders that are not on Ethereum.
@@ -134,7 +134,7 @@ impl<M: Provider + Send + Sync + 'static> OpenseaSudoArb<M> {
             _ => return None,
         }
         // Ignore orders with non-eth payment.
-        if Address::from_slice(event.listing.payment_token.address.as_bytes()) != Address::ZERO {
+        if event.listing.payment_token.address != Address::ZERO {
             return None;
         }
 
@@ -146,17 +146,13 @@ impl<M: Provider + Send + Sync + 'static> OpenseaSudoArb<M> {
             .max_by(|a, b| a.1.cmp(b.1))?;
 
         // Ignore orders that are not profitable.
-        if max_bid <= &primitive_u256_to_alloy(event.listing.base_price) {
+        if max_bid <= &event.listing.base_price {
             return None;
         }
 
         // Build arb tx.
-        self.build_arb_tx(
-            B256::from_slice(event.listing.order_hash.as_bytes()),
-            *max_pool,
-            *max_bid,
-        )
-        .await
+        self.build_arb_tx(event.listing.order_hash, *max_pool, *max_bid)
+            .await
     }
 
     /// Process new block events, updating the internal state.
@@ -319,10 +315,6 @@ impl<M: Provider + Send + Sync + 'static> OpenseaSudoArb<M> {
         }
         Ok(pool_addresses)
     }
-}
-
-fn primitive_u256_to_alloy(value: impl ToString) -> U256 {
-    U256::from_str_radix(&value.to_string(), 10).expect("primitive U256 decimal is valid")
 }
 
 fn build_execute_arb_tx(

@@ -10,7 +10,6 @@ alloy = { workspace = true, features = ["providers", "rpc-types"] }
 alloy-primitives.workspace = true
 artemis-core = { path = "../../artemis-core" }
 bindings = { path = "./bindings" }
-opensea-stream = { git = "https://github.com/FrankieIsLost/opensea-stream-rs"}
 opensea-v2 = { path = "../../clients/opensea-v2" }
 
 ## async

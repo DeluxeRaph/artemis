@@ -1,6 +1,5 @@
 use alloy::primitives::Address;
-
-use mev_share::{rpc::SendBundleRequest, sse};
+use artemis_core::mev_share::{rpc::SendBundleRequest, sse};
 
 /// Core Event enum for the current strategy.
 #[derive(Debug, Clone)]

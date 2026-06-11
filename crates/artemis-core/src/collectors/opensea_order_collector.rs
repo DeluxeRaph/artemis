@@ -1,11 +1,11 @@
-use crate::types::{Collector, CollectorStream};
-use anyhow::Result;
-use async_trait::async_trait;
-use opensea_stream::{
+use crate::opensea_stream::{
     client,
     schema::{self, ItemListedData},
     subscribe_to, Collection, Network,
 };
+use crate::types::{Collector, CollectorStream};
+use anyhow::Result;
+use async_trait::async_trait;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
