@@ -1,527 +1,337 @@
 # Artemis ethers-rs to Alloy migration inventory
 
-This document maps remaining `ethers-rs` usage in Artemis to the Alloy APIs that should replace it. It is intentionally repo-scoped: no QuickNode, AgentCash, or private harness logic belongs here.
+This inventory reflects checkpoint `9dc34ca` on branch `migration`.
 
-## Current migration status
+Scope of the audit:
 
-- Branch: `migration`
-- First code slice completed: `opensea-v2` client models now use Alloy primitives and no longer depend directly on `ethers`.
-- Remaining migration work is concentrated in:
-  - `artemis-core` provider-facing collectors/executors/utilities
-  - Chainbound / bundle submission client code
-  - strategy wrappers that still depend on generated ethers bindings
-  - generated `ethers-rs` Abigen bindings
-  - binaries, examples, and generator templates
+- Excluded `.git/` and `target/`.
+- Excluded the deleted `crates/strategies/mev-share-uni-arb/bindings/` tree.
+- Counted remaining `ethers::` and `ethers_` source references.
+- Checked manifest dependencies and the active dependency graph with `cargo tree`.
 
-## Inventory summary
+## Summary
 
-The reproducible active-code/dependency scan used for this inventory excludes `.git/`, `target/`, `docs/`, `Cargo.lock`, every `README.md`, and `justfile`, then counts regex matches for `ethers\w*`:
+The migration is now substantially past the original baseline. Core collectors,
+mempool submission, OpenSea v2 client types, MEV-Share relay auth, Chainbound
+bundle request surfaces, and MEV-share arb generated bindings have moved toward
+Alloy.
 
-```bash
-python3 - <<'PY'
-from pathlib import Path
-import re
+Remaining ethers usage is concentrated in three areas:
 
-root = Path('.')
-pattern = re.compile(r'ethers\w*')
-exclude_dirs = {'.git', 'target'}
-exclude_names = {'Cargo.lock', 'README.md', 'justfile'}
+- OpenSea sudo arb generated ethers Abigen bindings and the strategy bridge that
+  still consumes them.
+- Bundle relay internals that sign or submit through ethers-shaped upstream
+  crates (`ethers-flashbots`, `mev-share`, and Chainbound Fiber).
+- Binaries/examples that still construct ethers providers for strategies with
+  ethers provider/signing bounds.
 
-files = hits = generated_files = generated_hits = 0
-binding_cargo_files = binding_cargo_hits = 0
-for path in root.rglob('*'):
-    if not path.is_file():
-        continue
-    rel = path.relative_to(root).as_posix()
-    if exclude_dirs.intersection(path.parts):
-        continue
-    if rel.startswith('docs/') or path.name in exclude_names:
-        continue
-    text = path.read_text(errors='ignore')
-    count = len(pattern.findall(text))
-    if not count:
-        continue
-    files += 1
-    hits += count
-    is_binding = '/bindings/' in rel or rel.endswith('/bindings/Cargo.toml')
-    if is_binding:
-        generated_files += 1
-        generated_hits += count
-        if rel.endswith('/bindings/Cargo.toml'):
-            binding_cargo_files += 1
-            binding_cargo_hits += count
+Fresh scan results:
 
-print(f'active files={files} active ethers_tokens={hits}')
-print(f'generated bindings including binding Cargo.toml={generated_files} files / {generated_hits} ethers_tokens')
-print(f'binding Cargo.toml still active={binding_cargo_files} files / {binding_cargo_hits} ethers_tokens')
-print(f'generated .rs-only bindings={generated_files - binding_cargo_files} files / {generated_hits - binding_cargo_hits} ethers_tokens')
-PY
-```
-
-Current output:
-
-- Active code/dependency scan: 118 files with remaining ethers-rs references / 11,314 `ethers*` token occurrences.
-- Generated bindings dominate the count: 90 files / 11,240 `ethers*` token occurrences when the two binding `Cargo.toml` files are included.
-- Generated `.rs` binding files only: 88 files / 11,238 `ethers*` token occurrences.
-- The two excluded-from-`.rs` binding `Cargo.toml` files still contain active ethers dependencies: `crates/strategies/opensea-sudo-arb/bindings/Cargo.toml` and `crates/strategies/mev-share-uni-arb/bindings/Cargo.toml`.
-- A broader repository scan excluding only `.git/` and `target/` finds 124 files / 11,453 `ethers*` token occurrences because it includes docs, READMEs, `Cargo.lock`, and `justfile`.
-
-### Non-generated hotspots
-
-- Workspace root:
+- `rg` active source scan excluding target and deleted MEV-share bindings:
+  97 files / 10,798 `ethers::|ethers_` matches.
+- OpenSea sudo arb generated binding files account for 82 files / 10,698
+  matches.
+- Non-doc, non-generated files account for 13 files / 72 matches.
+- Active manifests with direct ethers dependencies:
   - `Cargo.toml`
-  - currently declares `ethers` and `ethers-signers` workspace dependencies.
-- `crates/artemis-core`:
-  - `Cargo.toml`
-  - `src/collectors/block_collector.rs`
-  - `src/collectors/log_collector.rs`
-  - `src/collectors/mempool_collector.rs`
-  - `src/executors/flashbots_executor.rs`
-  - `src/executors/mempool_executor.rs`
-  - `src/executors/mev_share_executor.rs`
-  - `src/utilities/state_override_middleware.rs`
-  - `tests/main.rs`
-- `crates/clients/chainbound`:
-  - `Cargo.toml`
-  - `src/echo.rs`
-  - `src/fiber.rs`
-  - `src/lib.rs`
-  - `src/mev_bundle.rs`
-- Strategies, non-generated:
-  - `crates/strategies/mev-share-uni-arb/Cargo.toml`
-  - `crates/strategies/mev-share-uni-arb/src/strategy.rs`
-  - `crates/strategies/mev-share-uni-arb/src/types.rs`
+  - `bin/artemis/Cargo.toml`
+  - `crates/artemis-core/Cargo.toml`
+  - `crates/clients/chainbound/Cargo.toml`
   - `crates/strategies/opensea-sudo-arb/Cargo.toml`
-  - `crates/strategies/opensea-sudo-arb/src/constants.rs`
-  - `crates/strategies/opensea-sudo-arb/src/strategy.rs`
-  - `crates/strategies/opensea-sudo-arb/src/types.rs`
-- Generated binding crates:
-  - `crates/strategies/mev-share-uni-arb/bindings`
-  - `crates/strategies/opensea-sudo-arb/bindings`
-- Other:
-  - `bin/artemis`
-  - `examples/mev-share-arb`
-  - `crates/generator`
+  - `crates/strategies/opensea-sudo-arb/bindings/Cargo.toml`
+  - `crates/strategies/mev-share-uni-arb/Cargo.toml`
+  - `examples/mev-share-arb/Cargo.toml`
 
-## Target Alloy crate set
+`cargo tree -i alloy` shows the workspace on `alloy v2.0.5`.
+`cargo tree -i alloy-primitives` shows `alloy-primitives v1.6.0`, which is the
+Alloy 2 crate family currently resolved by `alloy v2.0.5`.
 
-Use a coherent Alloy version across the workspace rather than mixing old and new Alloy generations.
+`cargo tree -i ethers` shows `ethers v2.0.8` still required by:
 
-Recommended target crate family:
+- `bin/artemis`
+- `crates/artemis-core`
+- `crates/strategies/opensea-sudo-arb`
+- `crates/strategies/opensea-sudo-arb/bindings`
+- `ethers-flashbots`
 
-- `alloy` with features as needed:
-  - `contract`
-  - `providers`
-  - `provider-http`
-  - `provider-ws` for WebSocket providers and subscription transports
-  - `pubsub` for `subscribe_blocks`, `subscribe_logs`, `subscribe_pending_transactions`, and `subscribe_full_pending_transactions`
-  - `provider-mev-api` for `alloy_provider::ext::MevApi` Flashbots / MEV provider extensions
-  - `rpc-types-mev` for umbrella-crate access to MEV RPC schemas
-  - `signer-local`
-  - `rpc-types`
-  - `reqwest-rustls-tls`
-- `alloy-primitives`
-- `alloy-rpc-types-eth`
-- `alloy-provider` with equivalent `ws`, `pubsub`, and `mev-api` feature support when using direct crates instead of the umbrella `alloy` crate
-- `alloy-network`
-- `alloy-consensus`
-- `alloy-signer`
-- `alloy-signer-local`
-- `alloy-contract`
-- `alloy-sol-types` / `alloy::sol!`
-- `alloy-rpc-types-mev` for Flashbots / MEV RPC types
+`cargo tree -i ethers-signers` additionally shows `mev-share-rpc-api` through
+`mev-share`, which keeps an upstream signer dependency in the graph even after
+local MEV-share binding deletion.
 
-Avoid `alloy-flashbots-rs = "0.1.0"` for the full migration unless it is updated: it depends on old Alloy crates and can conflict with modern Alloy dependency graphs.
+## Crate inventory
 
-## Ethers to Alloy replacement map
+### Workspace root
 
-### Provider and middleware
+Files:
 
-Current ethers APIs:
+- `Cargo.toml`
 
-```rust
-ethers::providers::Middleware
-ethers::providers::Provider
-ethers::providers::PubsubClient
-```
+Remaining ethers usage:
 
-Alloy replacements:
+- Workspace dependency `ethers = { version = "2", features = ["ws", "rustls"] }`.
 
-```rust
-alloy_provider::Provider
-alloy_provider::ProviderBuilder
-alloy_provider::RootProvider
-```
+Removable now:
 
-Recommended generic bound:
+- No. It is still consumed by active crates listed below.
 
-```rust
-P: alloy_provider::Provider + Clone + Send + Sync + 'static
-```
+Next action:
 
-Provider construction:
+- Remove the workspace dependency only after the OpenSea strategy/bindings,
+  relay executor internals, Chainbound, and MEV-share strategy have dropped
+  their direct ethers dependency.
 
-```rust
-let http_provider = alloy_provider::ProviderBuilder::new().connect_http(url);
-let ws_provider = alloy_provider::ProviderBuilder::new().connect(ws_url).await?;
-```
+### `bin/artemis`
 
-Alloy does not use ethers-style `Middleware` as the central abstraction. For custom behavior, prefer wrapper structs, provider fillers/layers where appropriate, or explicit helper functions at the call site.
+Files:
 
-### Block subscription
+- `bin/artemis/Cargo.toml`
+- `bin/artemis/src/main.rs`
 
-Current ethers:
+Remaining ethers usage:
 
-```rust
-provider.subscribe_blocks().await?
-```
+- Builds an ethers WebSocket provider, nonce manager, and `LocalWallet`.
+- Passes that provider into `OpenseaSudoArb::new`.
+- Builds a separate Alloy provider for migrated collectors/executors.
 
-Alloy:
+Removable now:
 
-```rust
-let sub = provider.subscribe_blocks().await?;
-let stream = sub.into_stream();
-```
+- Not independently. This binary can drop ethers only after
+  `opensea-sudo-arb` accepts an Alloy provider/signer end to end.
 
-Notes:
+Next action:
 
-- Alloy `subscribe_blocks()` subscribes to `newHeads` and yields header responses.
-- If full block bodies are needed, use `subscribe_full_blocks()`.
-- HTTP polling alternatives include `watch_blocks()`, `watch_headers()`, and `watch_full_blocks()`.
+- Once OpenSea sudo arb bindings are replaced with Alloy `sol!` or a narrower
+  Alloy contract surface, remove the ethers provider path and keep a single
+  Alloy provider/signer stack in the binary.
 
-### Log subscription
+### `crates/artemis-core`
 
-Current ethers:
+Files:
 
-```rust
-provider.subscribe_logs(&filter).await?
-```
+- `crates/artemis-core/Cargo.toml`
+- `crates/artemis-core/src/executors/flashbots_executor.rs`
+- `crates/artemis-core/src/utilities/state_override_middleware.rs`
 
-Alloy:
+Remaining ethers usage:
 
-```rust
-use alloy_rpc_types_eth::Filter;
+- `flashbots_executor.rs` keeps an Alloy-facing public bundle type
+  (`Vec<alloy::rpc::types::TransactionRequest>`) but converts each request to
+  ethers `TypedTransaction` for signing/submission through
+  `ethers-flashbots::FlashbotsMiddleware`.
+- The conversion path currently preserves legacy and EIP-1559 fields and
+  rejects unsupported access-list, blob, authorization-list, conflicting input,
+  and incompatible fee/type combinations.
+- `state_override_middleware.rs` is an ethers `Middleware` wrapper around
+  `ethers::providers::spoof::State`; it is used by the OpenSea sudo arb quoter
+  while that strategy still uses ethers bindings.
+- `mev-share = "0.1.4"` keeps ethers signer crates in the dependency graph
+  through `mev-share-rpc-api`, even though local public relay auth now uses an
+  Alloy signer.
 
-let sub = provider.subscribe_logs(&filter).await?;
-let stream = sub.into_stream();
-```
+Removable now:
 
-HTTP polling alternative:
+- `state_override_middleware.rs`: only after OpenSea sudo arb no longer needs
+  ethers `ContractCall` with state override.
+- `flashbots_executor.rs`: not cleanly removable without replacing
+  `ethers-flashbots` with Alloy-native relay submission or a local JSON-RPC
+  implementation.
+- `mev-share`: not locally removable while `MevshareExecutor` and MEV-share
+  strategy actions still use upstream `mev_share::rpc` request types.
 
-```rust
-provider.watch_logs(&filter).await?
-```
+Upstream-blocked:
 
-### Pending transaction subscription
+- `ethers-flashbots` is ethers-native.
+- `mev-share`/`mev-share-rpc-api` are ethers-shaped in their request/signing
+  dependencies.
 
-Current ethers:
+Next actions:
 
-```rust
-let stream = provider.subscribe_pending_txs().await?;
-let stream = stream.transactions_unordered(256);
-```
+- For Flashbots, either implement a minimal Alloy-native `eth_sendBundle` /
+  `eth_callBundle` JSON-RPC client locally, or verify a current Alloy 2-native
+  relay extension can replace `ethers-flashbots` without pulling an older Alloy
+  generation.
+- For MEV-share, decide whether to keep upstream request structs behind a narrow
+  bridge or fork/replace the request types locally.
+- Delete `StateOverrideMiddleware` after the OpenSea quoter is moved to Alloy
+  calls with state override support or an equivalent local RPC helper.
 
-Alloy options:
+### `crates/clients/chainbound`
 
-```rust
-let hashes = provider.subscribe_pending_transactions().await?.into_stream();
-let full = provider.subscribe_full_pending_transactions().await?.into_stream();
-```
+Files:
 
-If full pending transactions are not supported by the node, subscribe to hashes and call:
+- `crates/clients/chainbound/Cargo.toml`
+- `crates/clients/chainbound/src/echo.rs`
+- `crates/clients/chainbound/src/fiber.rs`
+- `crates/clients/chainbound/src/lib.rs`
 
-```rust
-provider.get_transaction_by_hash(hash).await?
-```
+Remaining ethers usage:
 
-HTTP polling alternatives:
+- `echo.rs` exposes Alloy transaction requests in `SendBundleArgs` but converts
+  them to ethers `TypedTransaction` for signing and uses an ethers middleware to
+  fetch the next block number.
+- The Echo conversion path preserves legacy and EIP-1559 fields and rejects
+  unsupported transaction fields instead of dropping them.
+- `fiber.rs` exposes Fiber transaction events as `ethers::types::Transaction`
+  because `fiber-rs` currently streams that type.
+- Tests/examples use ethers providers and wallets.
 
-```rust
-provider.watch_pending_transactions().await?
-provider.watch_full_pending_transactions().await?
-```
+Removable now:
 
-### Common provider calls
+- Echo block-number lookup and signing can be migrated locally to Alloy.
+- Fiber transaction event type is upstream-shaped unless Artemis wraps or
+  converts Fiber events at the crate boundary.
 
-- `get_block_number()` → `provider.get_block_number().await?`
-- `send_raw_transaction(bytes)` → `provider.send_raw_transaction(&encoded_tx).await?`
-- `send_transaction(tx, None)` → `provider.send_transaction(tx).await?`
-- `estimate_gas(&tx, None)` → `provider.estimate_gas(tx).await?`
-- `get_gas_price()` → `provider.get_gas_price().await?`
+Upstream-blocked:
 
-Important return differences:
+- Fiber transaction payloads from `fiber-rs` are ethers transaction objects.
 
-- Alloy `estimate_gas` returns `u64`.
-- Alloy `get_gas_price` returns `u128`.
-- Alloy `send_raw_transaction` returns a `PendingTransactionBuilder`.
-
-### Primitive and RPC types
-
-Ethers primitives:
-
-```rust
-H160
-H256
-U256
-U64
-Bytes
-Address
-```
+Next actions:
 
-Alloy primitives:
+- Split Echo from Fiber dependencies if possible: migrate Echo to an Alloy
+  provider/signer or local signer helper first.
+- Add an Alloy event wrapper for Fiber transactions if the crate should expose
+  Alloy types even while Fiber internally returns ethers values.
 
-```rust
-alloy_primitives::Address
-alloy_primitives::B256
-alloy_primitives::U256
-alloy_primitives::Bytes
-u64 / u128 for many RPC quantities
-```
+### `crates/strategies/opensea-sudo-arb`
 
-Ethers RPC types:
+Files:
 
-```rust
-ethers::types::Transaction
-ethers::types::Block
-ethers::types::Log
-ethers::types::Filter
-ethers::types::TransactionRequest
-ethers::types::Chain
-```
+- `crates/strategies/opensea-sudo-arb/Cargo.toml`
+- `crates/strategies/opensea-sudo-arb/src/constants.rs`
+- `crates/strategies/opensea-sudo-arb/src/strategy.rs`
+- `crates/strategies/opensea-sudo-arb/src/types.rs`
+- `crates/strategies/opensea-sudo-arb/bindings/Cargo.toml`
+- `crates/strategies/opensea-sudo-arb/bindings/src/*.rs`
 
-Alloy RPC types:
+Remaining ethers usage:
 
-```rust
-alloy_rpc_types_eth::Transaction
-alloy_rpc_types_eth::Block
-alloy_rpc_types_eth::Header
-alloy_rpc_types_eth::Log
-alloy_rpc_types_eth::Filter
-alloy_rpc_types_eth::TransactionRequest
-alloy_primitives::ChainId // usually u64-compatible
-```
+- The generated binding crate is still ethers Abigen output and dominates the
+  remaining direct source references.
+- The strategy still has an ethers `Middleware` provider bound, ethers pool/order
+  primitive types, ethers `Filter`, generated contract calls, and a bridge from
+  ethers `TypedTransaction` to Alloy `TransactionRequest`.
+- `types.rs` converts Alloy OpenSea response primitives into ethers binding
+  parameter structs for the generated arb contract.
+- `constants.rs` uses ethers `EthEvent` signatures and `Lazy` because the event
+  filters are generated ethers types.
 
-### Filter builder
+Removable now:
 
-Ethers patterns:
+- Yes, with local work. This is the largest remaining local migration slice.
 
-```rust
-Filter::new().address(...).topic0(...).event(...)
-```
+Next actions:
 
-Alloy patterns:
+- Replace the broad generated ethers binding crate with minimal Alloy `sol!`
+  bindings or hand-written ABI call/event structs for the actual surface used:
+  - `SudoOpenseaArb::execute_arb`
+  - `SudoPairQuoter::get_multiple_sell_quotes`
+  - `SUDOPAIRQUOTER_DEPLOYED_BYTECODE`
+  - `LSSVMPairFactory::NewPair` event querying
+  - pool touch event signatures used by `POOL_EVENT_SIGNATURES`
+- Preserve existing regression coverage for OpenSea order parameter conversion,
+  quote conversion, factory event filtering, and transaction request field
+  preservation.
+- After this lands, remove `StateOverrideMiddleware` if no other crate uses it,
+  remove this crate's direct ethers dependency, and simplify `bin/artemis`.
 
-```rust
-Filter::new()
-    .address(address)
-    .event("Transfer(address,address,uint256)")
-    .event_signature(topic0)
-    .topic1(topic1)
-    .topic2(topic2)
-    .topic3(topic3)
-    .from_block(...)
-    .to_block(...)
-    .at_block_hash(...)
-```
+### `crates/strategies/mev-share-uni-arb`
 
-### Wallets and signers
+Files:
 
-Ethers:
+- `crates/strategies/mev-share-uni-arb/Cargo.toml`
+- `crates/strategies/mev-share-uni-arb/src/strategy.rs`
+- `crates/strategies/mev-share-uni-arb/src/types.rs`
 
-```rust
-ethers::signers::LocalWallet
-ethers::signers::Signer
-wallet.sign_transaction(&tx).await?
-wallet.sign_message(msg).await?
-wallet.address()
-wallet.with_chain_id(chain)
-```
+Remaining ethers usage:
 
-Alloy:
+- The generated binding crate has been deleted.
+- Calldata generation has moved to Alloy `sol!`.
+- The strategy still uses ethers provider/signer traits, ethers
+  `TypedTransaction`, and ethers `TransactionRequest` so it can call
+  `fill_transaction`, sign the transaction, RLP encode it, and build upstream
+  `mev_share::rpc::SendBundleRequest`.
+- Tests still use ethers ABI encoding as a compatibility oracle.
 
-```rust
-alloy_signer_local::PrivateKeySigner
-alloy_signer::Signer
-alloy_signer::SignerSync
-alloy_network::TxSigner
-alloy_network::TxSignerSync
-```
+Removable now:
 
-Examples:
+- Partly. Local transaction construction/signing can move to Alloy, but
+  `mev-share` request types remain upstream-shaped.
 
-```rust
-let signer: alloy_signer_local::PrivateKeySigner = private_key_hex.parse()?;
-let signer = signer.with_chain_id(Some(chain_id));
-let address = signer.address();
-let sig = signer.sign_message(message).await?;
-signer.sign_transaction(&mut tx).await?;
-```
+Upstream-blocked:
 
-Important difference: Alloy transaction signing works over mutable signable transaction types rather than ethers `TypedTransaction`.
+- `mev-share` and `mev-share-rpc-api` keep ethers-shaped types/signing
+  dependencies in the graph.
 
-### Transaction request and typed transactions
+Next actions:
 
-Ethers:
+- Move gas/block lookups and transaction filling/signing to Alloy.
+- Keep `mev_share::rpc::{SendBundleRequest, BundleItem, Inclusion}` behind a
+  small adapter, or replace those request structs locally if removing the
+  upstream crate is desired.
+- Keep the ABI parity tests until the Alloy-only transaction builder has its own
+  field-preservation coverage.
 
-```rust
-ethers::types::transaction::eip2718::TypedTransaction
-ethers::types::TransactionRequest
-```
+### `examples/mev-share-arb`
 
-Alloy:
+Files:
 
-```rust
-alloy_rpc_types_eth::TransactionRequest
-alloy_consensus::{TxLegacy, TxEip2930, TxEip1559, TxEip4844, TxEip7702, TxEnvelope, TypedTransaction}
-```
+- `examples/mev-share-arb/Cargo.toml`
+- `examples/mev-share-arb/src/main.rs`
 
-Recommended Artemis split:
+Remaining ethers usage:
 
-- Use `TransactionRequest` for normal provider-filled/sent mempool transactions.
-- Use Alloy consensus/envelope types where Artemis needs to sign and encode bundle transactions manually.
+- Builds an ethers WebSocket provider, nonce manager, and `LocalWallet` for
+  `MevShareUniArb`.
+- Uses an Alloy `PrivateKeySigner` for `MevshareExecutor` relay auth.
 
-### Contract bindings and Abigen
+Removable now:
 
-Current ethers generated bindings use:
+- Not independently. It depends on the MEV-share strategy constructor still
+  requiring ethers provider/signer types.
 
-```rust
-ethers::contract::Contract
-ethers::contract::ContractFactory
-ethers::contract::builders::*
-ethers::providers::Middleware
-ethers::contract::{EthError, EthDisplay, EthEvent}
-```
+Next action:
 
-Alloy replacement:
+- After `mev-share-uni-arb` moves provider/signing to Alloy, collapse the
+  example to one Alloy provider/signer stack.
 
-```rust
-alloy::sol!
-#[sol(rpc)]
-#[sol(bytecode = "...")]
-alloy_contract::CallBuilder
-```
+### Deleted MEV-share generated bindings
 
-Pattern:
+Files:
 
-```rust
-use alloy::sol;
+- `crates/strategies/mev-share-uni-arb/bindings/`
 
-sol! {
-    #[sol(rpc)]
-    #[sol(bytecode = "0x...")]
-    contract MyContract {
-        constructor(address owner);
-        function doStuff(uint256 value) external returns (bytes32);
-    }
-}
+Status:
 
-let contract = MyContract::new(address, &provider);
-let result = contract.doStuff(value).call().await?;
-let pending = contract.doStuff(value).send().await?;
-```
+- Deleted by checkpoint `9dc34ca`; exclude this path from future active
+  migration counts.
 
-Do not manually port generated ethers bindings. Regenerate or replace them strategy-by-strategy with Alloy `sol!` interfaces and keep generated churn isolated.
+Next action:
 
-### Flashbots and MEV RPCs
+- Do not reintroduce this crate. Keep the local `sol!` interface in
+  `strategy.rs` or move it to a small Alloy binding module if it grows.
 
-Current ethers path:
+## Recommended next migration order
 
-```rust
-ethers_flashbots::{BundleRequest, FlashbotsMiddleware}
-FlashbotsMiddleware::new(client, relay_url, relay_signer)
-fb_client.simulate_bundle(&bundle)
-fb_client.send_bundle(&bundle)
-```
+1. OpenSea sudo arb generated bindings.
+   This removes almost all remaining source-level ethers references and unlocks
+   cleanup in `bin/artemis` and `StateOverrideMiddleware`.
+2. Chainbound Echo local signing/block-number migration.
+   This is mostly local and can reduce direct ethers use without waiting on
+   Fiber.
+3. Flashbots executor relay replacement.
+   Prefer a minimal local JSON-RPC relay client unless an Alloy 2-native
+   replacement is verified.
+4. MEV-share strategy/executor bridge narrowing.
+   Move local signing/filling to Alloy while explicitly isolating upstream
+   `mev-share` request types.
+5. Fiber event wrapper or upstream update.
+   Convert Fiber transaction events at the boundary if an Alloy public API is
+   more important than preserving the upstream type exactly.
 
-Alloy path:
+## Estimated completion
 
-```rust
-use alloy_provider::ext::MevApi;
-use alloy_rpc_types_mev::{EthCallBundle, EthSendBundle};
+Estimated overall migration completeness after checkpoint `9dc34ca`: 75-80%.
 
-provider.call_bundle(call_bundle).await?;
-provider.send_bundle(send_bundle).await?;
-```
-
-Authentication support is available under Alloy provider MEV auth helpers, including Flashbots signature header generation.
-
-### MEV-Share
-
-Current Artemis uses `mev-share = "0.1.4"`, `FlashbotsSignerLayer`, `MevApiClient`, and ethers signer traits.
-
-Replacement direction:
-
-- Prefer Alloy MEV provider extension:
-
-```rust
-provider.send_mev_bundle(mev_bundle).await?;
-```
-
-- Use `alloy_rpc_types_mev::MevSendBundle` where schemas match.
-- If SSE event collection remains needed, either keep an isolated non-ethers SSE crate if possible or implement reqwest/eventsource collection using Alloy primitive response models.
-
-### State override middleware
-
-Current ethers:
-
-```rust
-ethers::providers::spoof::State
-custom Middleware wrapper
-CallBuilder::new(...).state(&self.state)
-```
-
-Alloy direction:
-
-Provider calls use `EthCall::overrides(...)` / `overrides_opt(...)`:
-
-```rust
-use alloy_rpc_types_eth::state::StateOverride;
-
-provider.call(tx).overrides(overrides).await?
-```
-
-Alloy contract call builders expose state override support with `CallBuilder::state(...)`, so Artemis likely does not need a direct custom `Middleware` analog. Keep the provider-call and contract-call APIs distinct when porting call sites.
-
-## Proposed implementation order
-
-1. **Normalize Alloy crate versions**
-   - Move workspace to a coherent Alloy crate family.
-   - Avoid mixing old `alloy-rpc-types-eth = 0.2.x` with modern Alloy where possible.
-
-2. **Core provider boundary**
-   - Migrate `NewBlock`, log events, transaction events, filters, and mempool executor request types to Alloy RPC/primitives.
-   - Introduce compatibility helpers only at strategy/generated-binding boundaries.
-
-3. **Collectors**
-   - `BlockCollector`: `Provider::subscribe_blocks()` / `subscribe_full_blocks()`.
-   - `LogCollector`: `Provider::subscribe_logs(&Filter)`.
-   - `MempoolCollector`: `subscribe_full_pending_transactions()` or hashes + `get_transaction_by_hash()` fallback.
-
-4. **Mempool executor**
-   - Use Alloy `TransactionRequest`, `estimate_gas`, `get_gas_price`, and `send_transaction`/`send_raw_transaction`.
-
-5. **Relay and bundle executors**
-   - Replace `ethers-flashbots` with Alloy MEV API types.
-   - Replace or isolate `mev-share` ethers-signer dependency.
-   - Migrate Chainbound transaction signing to Alloy signers/envelopes.
-
-6. **Generated bindings**
-   - Regenerate `mev-share-uni-arb` bindings with Alloy `sol!` first, because it is smaller.
-   - Then migrate `opensea-sudo-arb` bindings.
-
-7. **Binaries, examples, and generator**
-   - Update CLI/main provider construction and wallet parsing.
-   - Update generator templates to emit Alloy-based dependencies and code.
-
-8. **Remove ethers workspace dependencies**
-   - Only after all non-generated and generated usages are gone.
-   - Final acceptance: `git grep -n 'ethers' -- '*.rs' '*.toml'` returns no dependency/code references except historical docs if intentionally retained.
-
-## Acceptance checks for full migration
-
-- `cargo test --all`
-- `cargo clippy --all --all-features -- -D warnings`
-- `cargo check --workspace`
-- `git grep` confirms no active ethers-rs code/dependency references remain.
-- Generated bindings are Alloy-based or replaced by checked-in Alloy interface modules.
-- Existing runtime behavior is covered by tests or compile-time type assertions at every migrated boundary.
+The project has moved most public/core surfaces to Alloy, but the remaining
+OpenSea binding crate is large, and relay/Fiber/MEV-share upstream dependencies
+still keep ethers in the dependency graph.
