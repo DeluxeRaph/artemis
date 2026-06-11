@@ -31,38 +31,6 @@ where
     Box::pin(items)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloy::primitives::B256;
-    use tokio_stream::{iter, StreamExt};
-
-    #[tokio::test]
-    async fn pending_hash_subscription_fetches_full_transactions_and_filters_missing_hashes() {
-        let missing_hash = B256::with_last_byte(2);
-        let hashes = iter([
-            B256::with_last_byte(1),
-            missing_hash,
-            B256::with_last_byte(3),
-        ]);
-
-        let mut transactions = pending_hashes_to_fetched_items(hashes, move |hash| async move {
-            if hash == missing_hash {
-                Ok(None)
-            } else {
-                Ok(Some(()))
-            }
-        });
-
-        let mut fetched = 0;
-        while transactions.next().await.is_some() {
-            fetched += 1;
-        }
-
-        assert_eq!(fetched, 2);
-    }
-}
-
 /// A collector that listens for new transactions in the mempool, and generates a stream of
 /// [events](Transaction) which contain the transaction.
 pub struct MempoolCollector<P> {
@@ -100,5 +68,37 @@ where
                     .map_err(Into::into)
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::B256;
+    use tokio_stream::{iter, StreamExt};
+
+    #[tokio::test]
+    async fn pending_hash_subscription_fetches_full_transactions_and_filters_missing_hashes() {
+        let missing_hash = B256::with_last_byte(2);
+        let hashes = iter([
+            B256::with_last_byte(1),
+            missing_hash,
+            B256::with_last_byte(3),
+        ]);
+
+        let mut transactions = pending_hashes_to_fetched_items(hashes, move |hash| async move {
+            if hash == missing_hash {
+                Ok(None)
+            } else {
+                Ok(Some(()))
+            }
+        });
+
+        let mut fetched = 0;
+        while transactions.next().await.is_some() {
+            fetched += 1;
+        }
+
+        assert_eq!(fetched, 2);
     }
 }
