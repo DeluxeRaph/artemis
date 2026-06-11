@@ -331,6 +331,11 @@ fn ethers_typed_tx_to_alloy_request(tx: &TypedTransaction) -> Option<AlloyTransa
     }
 
     if let TypedTransaction::Eip1559(eip1559) = tx {
+        if !eip1559.access_list.0.is_empty() {
+            // Non-empty EIP-1559 access lists affect signing/execution semantics;
+            // reject rather than silently dropping them until explicit Alloy support lands.
+            return None;
+        }
         request.transaction_type = Some(2);
         if let Some(max_fee_per_gas) = eip1559.max_fee_per_gas {
             request = request.max_fee_per_gas(ethers_u256_to_u128(max_fee_per_gas)?);
@@ -373,8 +378,12 @@ mod tests {
     use super::*;
     use alloy::primitives::address;
     use ethers::types::{
-        transaction::{eip1559::Eip1559TransactionRequest, eip2718::TypedTransaction},
-        Bytes as EthersBytes, TransactionRequest as EthersTransactionRequest,
+        transaction::{
+            eip1559::Eip1559TransactionRequest,
+            eip2718::TypedTransaction,
+            eip2930::{AccessList, AccessListItem},
+        },
+        Bytes as EthersBytes, TransactionRequest as EthersTransactionRequest, H256,
     };
 
     #[test]
@@ -452,5 +461,21 @@ mod tests {
         assert_eq!(converted.max_priority_fee_per_gas, Some(1_000_000_000));
         assert_eq!(converted.chain_id, Some(1));
         assert_eq!(converted.input.input().unwrap().as_ref(), &[0xca, 0xfe]);
+    }
+
+    #[test]
+    fn opensea_arb_eip1559_typed_tx_conversion_rejects_non_empty_access_list() {
+        let tx = Eip1559TransactionRequest::new()
+            .to("2222222222222222222222222222222222222222"
+                .parse::<H160>()
+                .unwrap())
+            .access_list(AccessList(vec![AccessListItem {
+                address: "3333333333333333333333333333333333333333"
+                    .parse::<H160>()
+                    .unwrap(),
+                storage_keys: vec![H256::from_low_u64_be(1)],
+            }]));
+
+        assert!(ethers_typed_tx_to_alloy_request(&TypedTransaction::Eip1559(tx)).is_none());
     }
 }
