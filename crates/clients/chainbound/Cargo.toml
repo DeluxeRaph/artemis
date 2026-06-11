@@ -7,6 +7,7 @@ repository = "https://github.com/paradigmxyz/artemis"
 readme = "README.md"
 
 [dependencies]
+alloy = { version = "2.0.5", features = ["rpc-types"] }
 artemis-core = { path = "../../artemis-core" }
 ethers = {  version = "2", features = ["ws", "rustls"] }
 fiber = { version = "0.3.3", git = "https://github.com/chainbound/fiber-rs" }

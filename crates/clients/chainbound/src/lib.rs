@@ -34,12 +34,15 @@ pub use mev_bundle::{BlockBuilder, BundleNotification, SendBundleArgs, SendBundl
 mod tests {
     use std::sync::Arc;
 
+    use alloy::{
+        primitives::{Address, U256},
+        rpc::types::TransactionRequest,
+    };
     use artemis_core::types::Executor;
     use ethers::{
         prelude::rand,
         providers::{Middleware, Provider},
         signers::{LocalWallet, Signer},
-        types::{TransactionRequest, U256},
     };
     use futures::StreamExt;
 
@@ -61,16 +64,16 @@ mod tests {
             let provider = Arc::new(Provider::connect("wss://eth.llamarpc.com").await.unwrap());
             let tx_signer = LocalWallet::new(&mut rand::thread_rng());
             let auth_signer = LocalWallet::new(&mut rand::thread_rng());
-            let account = tx_signer.address();
+            let account = Address::from_slice(tx_signer.address().as_bytes());
 
             let echo_executor = EchoExecutor::new(provider, tx_signer, auth_signer, api_key);
 
             // Fill in the bundle with a random transaction
-            let tx = TransactionRequest::new()
+            let tx = TransactionRequest::default()
                 .to(account)
                 .from(account)
-                .value(42)
-                .gas_price(U256::from_dec_str("100000000000000000").unwrap());
+                .value(U256::from(42))
+                .gas_price(100000000000000000);
 
             // Set the block as the next one
             let next_block = echo_executor.provider().get_block_number().await.unwrap() + 1;

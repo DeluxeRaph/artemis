@@ -1,8 +1,19 @@
 use std::{sync::Arc, time::Duration};
 
+use alloy::{
+    primitives::{Address as AlloyAddress, TxKind, U256 as AlloyU256},
+    rpc::types::TransactionRequest as AlloyTransactionRequest,
+};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use ethers::{providers::Middleware, signers::Signer};
+use ethers::{
+    providers::Middleware,
+    signers::Signer,
+    types::{
+        Address as EthersAddress, Bytes as EthersBytes,
+        TransactionRequest as EthersTransactionRequest, U256 as EthersU256,
+    },
+};
 use reqwest::{
     header::{HeaderMap, HeaderValue},
     Client,
@@ -94,6 +105,7 @@ where
 
         // Sign each transaction in bundle
         for tx in action.unsigned_txs.iter() {
+            let tx = alloy_tx_request_to_ethers(tx)?;
             let signature = self.tx_signer.sign_transaction(&tx.clone().into()).await?;
             let signed = tx.rlp_signed(&signature).to_string();
             action.standard_features.txs.push(signed);
@@ -150,5 +162,105 @@ where
         }
 
         Ok(())
+    }
+}
+
+fn alloy_tx_request_to_ethers(tx: &AlloyTransactionRequest) -> Result<EthersTransactionRequest> {
+    let mut request = EthersTransactionRequest::new();
+
+    if let Some(from) = tx.from {
+        request = request.from(alloy_address_to_ethers(from));
+    }
+
+    if let Some(to) = tx.to {
+        match to {
+            TxKind::Call(to) => request = request.to(alloy_address_to_ethers(to)),
+            TxKind::Create => {}
+        }
+    }
+
+    if let Some(value) = tx.value {
+        request = request.value(alloy_u256_to_ethers(value));
+    }
+    if let Some(gas) = tx.gas {
+        request = request.gas(gas);
+    }
+    if let Some(nonce) = tx.nonce {
+        request = request.nonce(nonce);
+    }
+    if let Some(gas_price) = tx.gas_price {
+        request = request.gas_price(gas_price);
+    }
+    if let Some(chain_id) = tx.chain_id {
+        request = request.chain_id(chain_id);
+    }
+    if let Some(input) = tx.input.unique_input()? {
+        request = request.data(EthersBytes::from(input.to_vec()));
+    }
+
+    Ok(request)
+}
+
+fn alloy_address_to_ethers(address: AlloyAddress) -> EthersAddress {
+    EthersAddress::from_slice(address.as_slice())
+}
+
+fn alloy_u256_to_ethers(value: AlloyU256) -> EthersU256 {
+    EthersU256::from_dec_str(&value.to_string()).expect("alloy U256 decimal is valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::{
+        primitives::{address, bytes, U256},
+        rpc::types::TransactionInput,
+    };
+
+    #[test]
+    fn alloy_bundle_transaction_request_preserves_fields_for_ethers_signing() {
+        let mut tx = AlloyTransactionRequest::default()
+            .from(address!("1111111111111111111111111111111111111111"))
+            .to(address!("2222222222222222222222222222222222222222"))
+            .value(U256::from(1234))
+            .gas_limit(21_000)
+            .nonce(7)
+            .gas_price(1_500_000_000)
+            .input(TransactionInput::new(bytes!("deadbeef")));
+        tx.chain_id = Some(1);
+
+        let converted = alloy_tx_request_to_ethers(&tx).unwrap();
+
+        assert_eq!(
+            converted.from,
+            Some("1111111111111111111111111111111111111111".parse().unwrap())
+        );
+        assert_eq!(
+            converted.to,
+            Some(
+                alloy_address_to_ethers(address!("2222222222222222222222222222222222222222"))
+                    .into()
+            )
+        );
+        assert_eq!(converted.value, Some(EthersU256::from(1234)));
+        assert_eq!(converted.gas, Some(21_000u64.into()));
+        assert_eq!(converted.nonce, Some(7u64.into()));
+        assert_eq!(converted.gas_price, Some(1_500_000_000u64.into()));
+        assert_eq!(converted.chain_id, Some(1u64.into()));
+        assert_eq!(
+            converted.data,
+            Some(EthersBytes::from(vec![0xde, 0xad, 0xbe, 0xef]))
+        );
+    }
+
+    #[test]
+    fn alloy_bundle_transaction_request_rejects_conflicting_input_aliases() {
+        let mut tx = AlloyTransactionRequest::default();
+        tx.input = TransactionInput {
+            input: Some(bytes!("dead").into()),
+            data: Some(bytes!("beef").into()),
+        };
+
+        assert!(alloy_tx_request_to_ethers(&tx).is_err());
     }
 }

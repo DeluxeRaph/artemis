@@ -1,4 +1,4 @@
-use ethers::types::TransactionRequest;
+use alloy::rpc::types::TransactionRequest;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
