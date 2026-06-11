@@ -6,10 +6,9 @@ edition = "2021"
 [dependencies]
 
 ## eth
-alloy = { workspace = true, features = ["rpc-types"] }
+alloy = { workspace = true, features = ["providers", "rpc-types"] }
 alloy-primitives.workspace = true
 artemis-core = { path = "../../artemis-core" }
-ethers.workspace = true
 bindings = { path = "./bindings" }
 opensea-stream = { git = "https://github.com/FrankieIsLost/opensea-stream-rs"}
 opensea-v2 = { path = "../../clients/opensea-v2" }

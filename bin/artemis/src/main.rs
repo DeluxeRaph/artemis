@@ -63,9 +63,6 @@ async fn main() -> Result<()> {
             .connect(&args.wss)
             .await?,
     );
-    let strategy_client =
-        strategy_ethers_bridge::build_strategy_client(&args.wss, &args.private_key).await?;
-
     // Set up opensea client.
     let opensea_client = OpenSeaV2Client::new(OpenSeaApiConfig {
         api_key: args.opensea_api_key.clone(),
@@ -90,7 +87,7 @@ async fn main() -> Result<()> {
         arb_contract_address: Address::from_str(&args.arb_contract_address)?,
         bid_percentage: args.bid_percentage,
     };
-    let strategy = OpenseaSudoArb::new(strategy_client, opensea_client, config);
+    let strategy = OpenseaSudoArb::new(alloy_provider.clone(), opensea_client, config);
     engine.add_strategy(Box::new(strategy));
 
     // Set up flashbots executor.
@@ -107,36 +104,4 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
-}
-
-mod strategy_ethers_bridge {
-    use std::sync::Arc;
-
-    use anyhow::Result;
-    use ethers::{
-        middleware::{NonceManagerMiddleware, SignerMiddleware},
-        prelude::MiddlewareBuilder,
-        providers::{Provider as EthersProvider, Ws},
-        signers::{LocalWallet, Signer},
-    };
-
-    pub type StrategyClient =
-        SignerMiddleware<NonceManagerMiddleware<EthersProvider<Ws>>, LocalWallet>;
-
-    /// Compatibility client for the OpenSea sudo strategy's ethers-generated bindings.
-    ///
-    /// Keep ethers construction here until the strategy bindings migrate to Alloy.
-    pub async fn build_strategy_client(
-        wss: &str,
-        private_key: &str,
-    ) -> Result<Arc<StrategyClient>> {
-        let ws = Ws::connect(wss).await?;
-        let provider = EthersProvider::new(ws);
-        let wallet: LocalWallet = private_key.parse()?;
-        let address = wallet.address();
-
-        Ok(Arc::new(
-            provider.nonce_manager(address).with_signer(wallet),
-        ))
-    }
 }
