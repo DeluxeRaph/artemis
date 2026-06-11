@@ -1468,7 +1468,7 @@ dependencies = [
 name = "bindings"
 version = "0.0.1"
 dependencies = [
- "ethers",
+ "alloy",
 ]
 
 [[package]]

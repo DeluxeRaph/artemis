@@ -4,15 +4,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use alloy::sol_types::{SolCall, SolEvent};
 use alloy::{
     primitives::{
         Address as AlloyAddress, Bytes as AlloyBytes, B256 as AlloyB256, U256 as AlloyU256,
     },
     rpc::types::{TransactionInput, TransactionRequest as AlloyTransactionRequest},
 };
-use bindings::lssvm_pair_factory::{LSSVMPairFactory, NewPairFilter};
-use bindings::sudo_opensea_arb::SudoOpenseaArb;
-use bindings::sudo_pair_quoter::{SellQuote, SudoPairQuoter, SUDOPAIRQUOTER_DEPLOYED_BYTECODE};
+use bindings::sudo_pair_quoter::{SellQuote, SUDOPAIRQUOTER_DEPLOYED_BYTECODE};
 use tracing::info;
 
 use crate::constants::FACTORY_DEPLOYMENT_BLOCK;
@@ -24,8 +23,12 @@ use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use artemis_core::utilities::state_override_middleware::StateOverrideMiddleware;
 use ethers::providers::Middleware;
-use ethers::types::{transaction::eip2718::TypedTransaction, Filter, NameOrAddress, H256};
-use ethers::types::{H160, U256};
+#[cfg(test)]
+use ethers::types::NameOrAddress;
+use ethers::types::{
+    transaction::eip2718::TypedTransaction, Bytes as EthersBytes, Filter,
+    TransactionRequest as EthersTransactionRequest, H160, H256, U256,
+};
 use opensea_stream::schema::Chain;
 use opensea_v2::client::OpenSeaV2Client;
 
@@ -42,11 +45,13 @@ pub struct OpenseaSudoArb<M> {
     /// Opensea V2 client
     opensea_client: OpenSeaV2Client,
     /// LSSVM pair factory contract for getting pair history.
-    lssvm_pair_factory: Arc<LSSVMPairFactory<M>>,
+    lssvm_pair_factory_address: H160,
     /// Quoter for batch reading pair state.
-    quoter: SudoPairQuoter<StateOverrideMiddleware<Arc<M>>>,
+    quoter: Arc<StateOverrideMiddleware<Arc<M>>>,
+    /// Address where the quoter bytecode is injected for read calls.
+    quoter_address: H160,
     /// Arb contract.
-    arb_contract: SudoOpenseaArb<M>,
+    arb_contract_address: AlloyAddress,
     /// Map NFT addresses to a list of Sudo pair addresses which trade that NFT.
     sudo_pools: HashMap<H160, Vec<H160>>,
     /// Map Sudo pool addresses to the current bid for that pool (in ETH).
@@ -57,29 +62,19 @@ pub struct OpenseaSudoArb<M> {
 
 impl<M: Middleware + 'static> OpenseaSudoArb<M> {
     pub fn new(client: Arc<M>, opensea_client: OpenSeaV2Client, config: Config) -> Self {
-        // Set up LSSVM pair factory contract.
-        let lssvm_pair_factory = Arc::new(LSSVMPairFactory::new(
-            *LSSVM_PAIR_FACTORY_ADDRESS,
-            client.clone(),
-        ));
         // Set up Sudo pair quoter contract.
         let mut state_override = StateOverrideMiddleware::new(client.clone());
         // Override account with contract bytecode
-        let addr = state_override.add_code(SUDOPAIRQUOTER_DEPLOYED_BYTECODE.clone());
-        // Instantiate contract with override client
-        let quoter = SudoPairQuoter::new(addr, Arc::new(state_override));
-        // Set up arb contract.
-        let arb_contract = SudoOpenseaArb::new(
-            alloy_address_to_ethers(config.arb_contract_address),
-            client.clone(),
-        );
+        let quoter_address =
+            state_override.add_code(EthersBytes::from_static(SUDOPAIRQUOTER_DEPLOYED_BYTECODE));
 
         Self {
             client,
             opensea_client,
-            lssvm_pair_factory,
-            quoter,
-            arb_contract,
+            lssvm_pair_factory_address: *LSSVM_PAIR_FACTORY_ADDRESS,
+            quoter: Arc::new(state_override),
+            quoter_address,
+            arb_contract_address: config.arb_contract_address,
             sudo_pools: HashMap::new(),
             pool_bids: HashMap::new(),
             bid_percentage: config.bid_percentage,
@@ -202,18 +197,15 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
 
         // Parse out arb contract parameters.
         let payment_value = order.fulfillment_data.transaction.value;
-        let total_profit = sudo_bid - payment_value;
+        let total_profit = sudo_bid - U256::from(payment_value);
 
         // Build arb tx.
-        let tx = self
-            .arb_contract
-            .execute_arb(
-                fulfill_listing_response_to_basic_order_parameters(order),
-                payment_value.into(),
-                sudo_pool,
-            )
-            .tx;
-        let tx = ethers_typed_tx_to_alloy_request(&tx)?;
+        let tx = build_execute_arb_tx(
+            self.arb_contract_address,
+            fulfill_listing_response_to_basic_order_parameters(order),
+            AlloyU256::from(payment_value),
+            ethers_address_to_alloy(sudo_pool),
+        );
         Some(Action::SubmitTx(SubmitTxToMempool {
             tx,
             gas_bid_info: Some(GasBidInfo {
@@ -225,7 +217,23 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
 
     /// Get quotes for a list of pools.
     async fn get_quotes_for_pools(&self, pools: Vec<H160>) -> Result<Vec<(H160, SellQuote)>> {
-        let quotes = self.quoter.get_multiple_sell_quotes(pools.clone()).await?;
+        let pool_addresses = pools
+            .iter()
+            .copied()
+            .map(ethers_address_to_alloy)
+            .collect::<Vec<_>>();
+        let call = bindings::sudo_pair_quoter::SudoPairQuoter::getMultipleSellQuotesCall {
+            pool_addresses,
+        };
+        let tx: TypedTransaction = EthersTransactionRequest::new()
+            .to(self.quoter_address)
+            .data(EthersBytes::from(call.abi_encode()))
+            .into();
+        let response = self.quoter.call(&tx, None).await?;
+        let quotes =
+            bindings::sudo_pair_quoter::SudoPairQuoter::getMultipleSellQuotesCall::abi_decode_returns(
+                response.as_ref(),
+            )?;
         let res = pools
             .into_iter()
             .zip(quotes)
@@ -238,16 +246,20 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
         for (pool_address, quote) in pools_and_quotes {
             // If a quote is available, update both the pool_bids and the sudo_pools maps.
             if quote.quote_available {
-                self.pool_bids.insert(pool_address, quote.price);
+                self.pool_bids
+                    .insert(pool_address, alloy_u256_to_ethers(quote.price));
                 self.sudo_pools
-                    .entry(quote.nft_address)
+                    .entry(alloy_address_to_ethers(quote.nft_address))
                     .or_insert(vec![])
                     .push(pool_address);
             }
             // If a quote is unavailable, remove from both the pool_bids and the sudo_pools maps.
             else {
                 self.pool_bids.remove(&pool_address);
-                if let Some(addresses) = self.sudo_pools.get_mut(&quote.nft_address) {
+                if let Some(addresses) = self
+                    .sudo_pools
+                    .get_mut(&alloy_address_to_ethers(quote.nft_address))
+                {
                     addresses.retain(|address| *address != pool_address);
                 }
             }
@@ -275,16 +287,34 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
         // Maxium range for a single Alchemy query is 2000 blocks.
         for block in (from_block..to_block).step_by(2000) {
             let events = self
-                .lssvm_pair_factory
-                .event::<NewPairFilter>()
-                .from_block(block)
-                .to_block(block + 2000)
-                .query()
+                .client
+                .get_logs(
+                    &Filter::new()
+                        .from_block(block)
+                        .to_block(block + 2000)
+                        .address(self.lssvm_pair_factory_address)
+                        .topic0(alloy_b256_to_ethers(
+                            bindings::lssvm_pair_factory::LSSVMPairFactory::NewPair::SIGNATURE_HASH,
+                        )),
+                )
                 .await?;
 
             let addresses = events
                 .iter()
-                .map(|event| event.pool_address)
+                .filter_map(|event| {
+                    let topics = event
+                        .topics
+                        .iter()
+                        .map(|topic| AlloyB256::from_slice(topic.as_bytes()))
+                        .collect::<Vec<_>>();
+                    let decoded =
+                        bindings::lssvm_pair_factory::LSSVMPairFactory::NewPair::decode_raw_log(
+                            topics,
+                            event.data.as_ref(),
+                        )
+                        .ok()?;
+                    Some(alloy_address_to_ethers(decoded.pool_address))
+                })
                 .collect::<Vec<_>>();
 
             info!(
@@ -298,6 +328,24 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
     }
 }
 
+fn build_execute_arb_tx(
+    arb_contract_address: AlloyAddress,
+    basic_order: bindings::zone_interface::BasicOrderParameters,
+    payment_value: AlloyU256,
+    sudo_pool: AlloyAddress,
+) -> AlloyTransactionRequest {
+    let call = bindings::sudo_opensea_arb::SudoOpenseaArb::executeArbCall {
+        basic_order,
+        payment_value,
+        sudo_pool,
+    };
+
+    AlloyTransactionRequest::default()
+        .to(arb_contract_address)
+        .input(TransactionInput::new(AlloyBytes::from(call.abi_encode())))
+}
+
+#[cfg(test)]
 fn ethers_typed_tx_to_alloy_request(tx: &TypedTransaction) -> Option<AlloyTransactionRequest> {
     let (TypedTransaction::Legacy(_) | TypedTransaction::Eip1559(_)) = tx else {
         // Access-list and other typed transactions need explicit Alloy support; do not
@@ -368,10 +416,19 @@ fn alloy_address_to_ethers(address: AlloyAddress) -> H160 {
     H160::from_slice(address.as_slice())
 }
 
+fn alloy_b256_to_ethers(value: AlloyB256) -> H256 {
+    H256::from_slice(value.as_slice())
+}
+
+fn alloy_u256_to_ethers(value: AlloyU256) -> U256 {
+    U256::from_dec_str(&value.to_string()).expect("alloy U256 decimal is valid")
+}
+
 fn ethers_u256_to_alloy(value: U256) -> AlloyU256 {
     AlloyU256::from_str_radix(&value.to_string(), 10).expect("ethers U256 decimal is valid")
 }
 
+#[cfg(test)]
 fn ethers_u256_to_u64(value: U256) -> Option<u64> {
     if value > U256::from(u64::MAX) {
         None
@@ -380,6 +437,7 @@ fn ethers_u256_to_u64(value: U256) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 fn ethers_u256_to_u128(value: U256) -> Option<u128> {
     if value > U256::from(u128::MAX) {
         None
@@ -391,7 +449,7 @@ fn ethers_u256_to_u128(value: U256) -> Option<u128> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::address;
+    use alloy::primitives::{address, b256};
     use ethers::types::{
         transaction::{
             eip1559::Eip1559TransactionRequest,
@@ -400,6 +458,60 @@ mod tests {
         },
         Bytes as EthersBytes, TransactionRequest as EthersTransactionRequest, H256,
     };
+
+    #[test]
+    fn opensea_arb_execute_arb_tx_builder_encodes_alloy_call() {
+        let basic_order = bindings::zone_interface::BasicOrderParameters {
+            consideration_token: address!("0000000000000000000000000000000000000001"),
+            consideration_identifier: AlloyU256::from(2),
+            consideration_amount: AlloyU256::from(3),
+            offerer: address!("0000000000000000000000000000000000000004"),
+            zone: address!("0000000000000000000000000000000000000005"),
+            offer_token: address!("0000000000000000000000000000000000000006"),
+            offer_identifier: AlloyU256::from(7),
+            offer_amount: AlloyU256::from(8),
+            basic_order_type: 9,
+            start_time: AlloyU256::from(10),
+            end_time: AlloyU256::from(11),
+            zone_hash: b256!("1212121212121212121212121212121212121212121212121212121212121212"),
+            salt: AlloyU256::from(13),
+            offerer_conduit_key: b256!(
+                "1414141414141414141414141414141414141414141414141414141414141414"
+            ),
+            fulfiller_conduit_key: b256!(
+                "1515151515151515151515151515151515151515151515151515151515151515"
+            ),
+            total_original_additional_recipients: AlloyU256::from(1),
+            additional_recipients: vec![bindings::zone_interface::AdditionalRecipient {
+                amount: AlloyU256::from(16),
+                recipient: address!("0000000000000000000000000000000000000017"),
+            }],
+            signature: AlloyBytes::from(vec![0xaa, 0xbb]),
+        };
+
+        let tx = build_execute_arb_tx(
+            address!("9999999999999999999999999999999999999999"),
+            basic_order.clone(),
+            AlloyU256::from(18),
+            address!("8888888888888888888888888888888888888888"),
+        );
+
+        assert_eq!(
+            *tx.to.unwrap().to().unwrap(),
+            address!("9999999999999999999999999999999999999999")
+        );
+        let decoded = bindings::sudo_opensea_arb::SudoOpenseaArb::executeArbCall::abi_decode(
+            tx.input.input().unwrap().as_ref(),
+        )
+        .unwrap();
+
+        assert_eq!(decoded.basic_order, basic_order);
+        assert_eq!(decoded.payment_value, AlloyU256::from(18));
+        assert_eq!(
+            decoded.sudo_pool,
+            address!("8888888888888888888888888888888888888888")
+        );
+    }
 
     #[test]
     fn opensea_arb_legacy_typed_tx_conversion_preserves_fields() {

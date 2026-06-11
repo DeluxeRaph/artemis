@@ -1,7 +1,7 @@
+use alloy::sol_types::SolEvent;
 use ethers::{
-    contract::EthEvent,
     prelude::Lazy,
-    types::{Address, TxHash},
+    types::{Address, H256 as TxHash},
 };
 
 /// Block number at which the sudo factory was deployed.
@@ -17,9 +17,13 @@ pub static LSSVM_PAIR_FACTORY_ADDRESS: Lazy<Address> = Lazy::new(|| {
 /// Group of event signatures which are emitted when a pool is touched.
 pub static POOL_EVENT_SIGNATURES: Lazy<Vec<TxHash>> = Lazy::new(|| {
     vec![
-        bindings::lssvm_pair::SwapNFTInPairFilter::signature(),
-        bindings::lssvm_pair::SwapNFTInPairFilter::signature(),
-        bindings::lssvm_pair::SpotPriceUpdateFilter::signature(),
-        bindings::lssvm_pair::TokenWithdrawalFilter::signature(),
+        alloy_b256_to_ethers(bindings::lssvm_pair::LSSVMPair::SwapNFTInPair::SIGNATURE_HASH),
+        alloy_b256_to_ethers(bindings::lssvm_pair::LSSVMPair::SwapNFTOutPair::SIGNATURE_HASH),
+        alloy_b256_to_ethers(bindings::lssvm_pair::LSSVMPair::SpotPriceUpdate::SIGNATURE_HASH),
+        alloy_b256_to_ethers(bindings::lssvm_pair::LSSVMPair::TokenWithdrawal::SIGNATURE_HASH),
     ]
 });
+
+fn alloy_b256_to_ethers(value: alloy::primitives::B256) -> TxHash {
+    TxHash::from_slice(value.as_slice())
+}
