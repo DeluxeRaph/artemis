@@ -1,4 +1,4 @@
-use ethers::types::H160;
+use alloy::primitives::Address;
 
 use mev_share::{rpc::SendBundleRequest, sse};
 
@@ -16,15 +16,15 @@ pub enum Action {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct PoolRecord {
-    pub token_address: H160,
-    pub uni_pool_address: H160,
-    pub sushi_pool_address: H160,
+    pub token_address: Address,
+    pub uni_pool_address: Address,
+    pub sushi_pool_address: Address,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct V2V3PoolRecord {
-    pub token_address: H160,
-    pub v3_pool: H160,
-    pub v2_pool: H160,
+    pub token_address: Address,
+    pub v3_pool: Address,
+    pub v2_pool: Address,
     pub weth_token0: bool,
 }

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
 use anyhow::Result;
 use artemis_core::{
     collectors::mevshare_collector::MevShareCollector,
@@ -7,13 +9,11 @@ use artemis_core::{
     executors::mev_share_executor::MevshareExecutor,
     types::{CollectorMap, ExecutorMap},
 };
-use alloy::signers::local::PrivateKeySigner;
 use clap::Parser;
 use ethers::{
     prelude::MiddlewareBuilder,
     providers::{Provider, Ws},
     signers::{LocalWallet, Signer},
-    types::Address,
 };
 use mev_share_uni_arb::{
     strategy::MevShareUniArb,

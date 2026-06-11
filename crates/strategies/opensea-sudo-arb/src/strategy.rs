@@ -5,7 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use alloy::{
-    primitives::{Address as AlloyAddress, Bytes as AlloyBytes, U256 as AlloyU256},
+    primitives::{
+        Address as AlloyAddress, Bytes as AlloyBytes, B256 as AlloyB256, U256 as AlloyU256,
+    },
     rpc::types::{TransactionInput, TransactionRequest as AlloyTransactionRequest},
 };
 use bindings::lssvm_pair_factory::{LSSVMPairFactory, NewPairFilter};
@@ -67,7 +69,10 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
         // Instantiate contract with override client
         let quoter = SudoPairQuoter::new(addr, Arc::new(state_override));
         // Set up arb contract.
-        let arb_contract = SudoOpenseaArb::new(config.arb_contract_address, client.clone());
+        let arb_contract = SudoOpenseaArb::new(
+            alloy_address_to_ethers(config.arb_contract_address),
+            client.clone(),
+        );
 
         Self {
             client,
@@ -183,7 +188,9 @@ impl<M: Middleware + 'static> OpenseaSudoArb<M> {
         // Get full order from Opensea V2 API.
         let response = self
             .opensea_client
-            .fulfill_listing(hash_to_fulfill_listing_request(order_hash))
+            .fulfill_listing(hash_to_fulfill_listing_request(ethers_b256_to_alloy(
+                order_hash,
+            )))
             .await;
         let order = match response {
             Ok(order) => order,
@@ -351,6 +358,14 @@ fn ethers_typed_tx_to_alloy_request(tx: &TypedTransaction) -> Option<AlloyTransa
 
 fn ethers_address_to_alloy(address: H160) -> AlloyAddress {
     AlloyAddress::from_slice(address.as_bytes())
+}
+
+fn ethers_b256_to_alloy(value: H256) -> AlloyB256 {
+    AlloyB256::from_slice(value.as_bytes())
+}
+
+fn alloy_address_to_ethers(address: AlloyAddress) -> H160 {
+    H160::from_slice(address.as_slice())
 }
 
 fn ethers_u256_to_alloy(value: U256) -> AlloyU256 {

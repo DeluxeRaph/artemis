@@ -4498,13 +4498,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mev-share-bindings"
-version = "0.1.0"
-dependencies = [
- "ethers",
-]
-
-[[package]]
 name = "mev-share-rpc-api"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4550,13 +4543,13 @@ dependencies = [
 name = "mev-share-uni-arb"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "anyhow",
  "artemis-core",
  "async-trait",
  "csv",
  "ethers",
  "mev-share",
- "mev-share-bindings",
  "serde",
  "tokio",
  "tracing",

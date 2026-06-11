@@ -13,8 +13,9 @@ default-members = ["bin/artemis", "bin/cli"]
 
 [workspace.dependencies]
 ## eth
+alloy = "2.0.5"
+alloy-primitives = "1.6.0"
 ethers = { version = "2", features = ["ws", "rustls"]}
-ethers-signers = "2.0"
 
 
 [profile.release]
@@ -22,4 +23,3 @@ panic = 'abort'
 
 [profile.dev]
 panic = 'abort'
-

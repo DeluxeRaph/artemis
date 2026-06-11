@@ -25,15 +25,15 @@ pub enum Action {
 /// Configuration for variables we need to pass to the strategy.
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub arb_contract_address: H160,
+    pub arb_contract_address: Address,
     pub bid_percentage: u64,
 }
 
 /// Convenience function to convert a hash to a fulfill listing request
-pub fn hash_to_fulfill_listing_request(hash: H256) -> FulfillListingRequest {
+pub fn hash_to_fulfill_listing_request(hash: B256) -> FulfillListingRequest {
     FulfillListingRequest {
         listing: Listing {
-            hash: b256_to_alloy(hash),
+            hash,
             chain: Chain::Mainnet,
             protocol_version: ProtocolVersion::V1_5,
         },
@@ -90,10 +90,6 @@ fn b256_to_ethers(value: B256) -> H256 {
     H256::from_slice(value.as_slice())
 }
 
-fn b256_to_alloy(value: H256) -> B256 {
-    B256::from_slice(value.as_bytes())
-}
-
 fn bytes_to_ethers(bytes: Bytes) -> ethers::types::Bytes {
     bytes.to_vec().into()
 }
@@ -111,7 +107,7 @@ mod tests {
 
     #[test]
     fn hash_to_fulfill_listing_request_serializes_alloy_values_for_opensea() {
-        let hash = H256::from_slice(&[0x11; 32]);
+        let hash = B256::from_slice(&[0x11; 32]);
 
         let req = hash_to_fulfill_listing_request(hash);
         let serialized = serde_json::to_value(req).unwrap();

@@ -1,8 +1,7 @@
-use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use anyhow::Result;
 use clap::Parser;
-use ethers::types::H160;
 use opensea_v2::client::{OpenSeaApiConfig, OpenSeaV2Client};
 
 use ethers::prelude::MiddlewareBuilder;
@@ -99,7 +98,7 @@ async fn main() -> Result<()> {
 
     // Set up opensea sudo arb strategy.
     let config = Config {
-        arb_contract_address: H160::from_str(&args.arb_contract_address)?,
+        arb_contract_address: Address::from_str(&args.arb_contract_address)?,
         bid_percentage: args.bid_percentage,
     };
     let strategy = OpenseaSudoArb::new(ethers_provider.clone(), opensea_client, config);

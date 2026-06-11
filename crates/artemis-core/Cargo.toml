@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 
 ## eth
-alloy = { version = "2.0.5", features = ["full", "node-bindings"] }
+alloy = { workspace = true, features = ["full", "node-bindings"] }
 ethers.workspace = true
 opensea-stream = { git = "https://github.com/FrankieIsLost/opensea-stream-rs"}
 mev-share = "0.1.4"
